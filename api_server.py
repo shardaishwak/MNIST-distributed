@@ -166,7 +166,7 @@ class APIDistributedServer(NetworkDistributedServer):
         return compile_model_from_config(self.model_config, input_shape, self.num_classes)
     
     def handle_client(self, client_sock: socket.socket, client_id: int, data_split):
-        """Override to update status"""
+        """Override to update status and handle progress updates"""
         self.client_status[client_id]['connected'] = True
         self.client_status[client_id]['status'] = 'connected'
         self.client_status[client_id]['last_ping'] = time.time()
@@ -185,9 +185,25 @@ class APIDistributedServer(NetworkDistributedServer):
         
         self.client_status[client_id]['status'] = 'training'
         
-        weights_payload = recv_bytes(client_sock)
-        trained_weights = pickle.loads(weights_payload)
+        # Receive messages - could be progress updates or final weights
+        while True:
+            payload = recv_bytes(client_sock)
+            data = pickle.loads(payload)
+            
+            # Check if this is a progress update
+            if isinstance(data, dict) and data.get('type') == 'progress':
+                # Update epoch progress
+                epoch = data.get('epoch', 0)
+                self.client_status[client_id]['epoch'] = epoch
+                self.client_status[client_id]['last_ping'] = time.time()
+                print(f"Client {client_id} progress: epoch {epoch}/{self.epochs_per_client}")
+                continue
+            
+            # Otherwise, this is the trained weights
+            trained_weights = data
+            break
         
+        # Receive history
         history_payload = recv_bytes(client_sock)
         history_dict = pickle.loads(history_payload)
         

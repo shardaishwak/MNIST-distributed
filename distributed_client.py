@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import socket, struct, pickle, time, sys, numpy as np, tensorflow as tf
 from tensorflow.keras.models import model_from_json
+from tensorflow.keras.callbacks import Callback
 
 def send_bytes(sock: socket.socket, payload: bytes) -> None:
     sock.sendall(struct.pack("!Q", len(payload)))
@@ -17,6 +18,30 @@ def recv_bytes(sock: socket.socket) -> bytes:
         return bytes(buf)
     (size,) = struct.unpack("!Q", recvn(8))
     return recvn(size)
+
+class EpochProgressCallback(Callback):
+    """Callback to send epoch progress updates to server"""
+    def __init__(self, sock: socket.socket, client_id: int):
+        super().__init__()
+        self.sock = sock
+        self.client_id = client_id
+    
+    def on_epoch_end(self, epoch, logs=None):
+        """Send progress update after each epoch"""
+        try:
+            progress_msg = {
+                'type': 'progress',
+                'client_id': self.client_id,
+                'epoch': epoch + 1,  # Convert to 1-indexed
+                'logs': logs or {}
+            }
+            # Use a non-blocking send for progress updates
+            try:
+                send_bytes(self.sock, pickle.dumps(progress_msg, protocol=pickle.HIGHEST_PROTOCOL))
+            except Exception as e:
+                print(f"Warning: Could not send progress update: {e}")
+        except Exception as e:
+            print(f"Error in progress callback: {e}")
 
 class NetworkDistributedClient:
     def __init__(self, server_host: str, server_port: int = 8888, connection_timeout: int = 30):
@@ -56,7 +81,10 @@ class NetworkDistributedClient:
         self.model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
 
     def train(self, epochs=5, batch_size=64, validation_split=0.1):
+        # Add progress callback along with other callbacks
+        progress_callback = EpochProgressCallback(self.sock, self.client_id)
         callbacks = [
+            progress_callback,
             tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=2, restore_best_weights=True),
             tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=1, min_lr=1e-4),
         ]

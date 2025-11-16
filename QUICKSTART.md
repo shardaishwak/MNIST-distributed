@@ -54,7 +54,7 @@ python distributed_client.py localhost 8888
 Watch the React Flow diagram update with:
 - Client nodes appearing dynamically
 - Status indicators (Green = Training/Completed, Yellow = Connected, Gray = Waiting)
-- Progress bars (note: updates only after training completes due to socket architecture)
+- **Real-time epoch progress bars** showing training progress as each client completes epochs
 
 ### 7. View Results
 
