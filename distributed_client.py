@@ -37,14 +37,16 @@ class NetworkDistributedClient:
         self.x_train, self.y_train = pkg['x_train'], pkg['y_train']
         self.client_id = pkg['client_id']
         cfg = pkg['model_config']
+        self.epochs = pkg.get('epochs', 5)  # Get epochs from server, default to 5
 
         labels = np.argmax(self.y_train, axis=1)
         total = len(labels)
         unique, counts = np.unique(labels, return_counts=True)
         dist = dict(zip(unique, counts))
+        num_classes = len(unique)
         print(f"\n=== Client {self.client_id} Data Summary ===")
         print(f"Total samples: {total}")
-        for c in range(10):
+        for c in range(num_classes):
             print(f"  {c}: {dist.get(c, 0)}")
         print("=========================================\n")
 
@@ -78,10 +80,12 @@ class NetworkDistributedClient:
         send_bytes(self.sock, pickle.dumps(self.model.get_weights(), protocol=pickle.HIGHEST_PROTOCOL))
         send_bytes(self.sock, pickle.dumps(history_dict, protocol=pickle.HIGHEST_PROTOCOL))
 
-    def run(self, epochs=5, batch_size=64):
+    def run(self, epochs=None, batch_size=64):
         self.connect()
         self.receive_package()
-        history = self.train(epochs=epochs, batch_size=batch_size)
+        # Use epochs from server package if not provided
+        epochs_to_use = epochs if epochs is not None else getattr(self, 'epochs', 5)
+        history = self.train(epochs=epochs_to_use, batch_size=batch_size)
         self.send_weights_and_history(history)
         self.sock.close()
 
@@ -91,7 +95,8 @@ def main():
         sys.exit(1)
     host = sys.argv[1]
     port = int(sys.argv[2]) if len(sys.argv) >= 3 else 8888
-    NetworkDistributedClient(host, port).run(epochs=5, batch_size=64)
+    # Don't hardcode epochs - let the server decide
+    NetworkDistributedClient(host, port).run(epochs=None, batch_size=64)
 
 if __name__ == "__main__":
     main()
