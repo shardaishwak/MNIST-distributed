@@ -214,7 +214,6 @@ def main():
     print(f"  Retry interval: {retry_interval}s")
     print(f"  Mode: Continuous (will reconnect after each session)")
     print(f"  Press Ctrl+C to stop\n")
-    # Don't hardcode epochs - let the server decide
     NetworkDistributedClient(host, port, retry_interval=retry_interval).run_continuous(epochs=None, batch_size=64)
 
 if __name__ == "__main__":
