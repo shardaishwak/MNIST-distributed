@@ -127,16 +127,44 @@ class NetworkDistributedClient:
     def send_weights_and_history(self, history_dict):
         send_bytes(self.sock, pickle.dumps(self.model.get_weights(), protocol=pickle.HIGHEST_PROTOCOL))
         send_bytes(self.sock, pickle.dumps(history_dict, protocol=pickle.HIGHEST_PROTOCOL))
+    
+    def send_crash_notification(self):
+        """Notify server that this client is crashing/disconnecting abnormally"""
+        try:
+            crash_msg = {
+                'type': 'crash',
+                'client_id': getattr(self, 'client_id', None),
+                'message': 'Client crashed or interrupted'
+            }
+            send_bytes(self.sock, pickle.dumps(crash_msg, protocol=pickle.HIGHEST_PROTOCOL))
+            print(f"Crash notification sent to server for client {getattr(self, 'client_id', 'unknown')}")
+        except Exception as e:
+            print(f"Could not send crash notification: {e}")
 
     def run_single_session(self, epochs=None, batch_size=64):
         """Run a single training session"""
-        self.connect()
-        self.receive_package()
-        # Use epochs from server package if not provided
-        epochs_to_use = epochs if epochs is not None else getattr(self, 'epochs', 5)
-        history = self.train(epochs=epochs_to_use, batch_size=batch_size)
-        self.send_weights_and_history(history)
-        self.sock.close()
+        try:
+            self.connect()
+            self.receive_package()
+            # Use epochs from server package if not provided
+            epochs_to_use = epochs if epochs is not None else getattr(self, 'epochs', 5)
+            history = self.train(epochs=epochs_to_use, batch_size=batch_size)
+            self.send_weights_and_history(history)
+            self.sock.close()
+        except KeyboardInterrupt:
+            # User interrupted - send crash notification
+            print("\n! Client interrupted by user")
+            if hasattr(self, 'sock') and self.sock:
+                self.send_crash_notification()
+                self.sock.close()
+            raise
+        except Exception as e:
+            # Unexpected error - send crash notification
+            print(f"\n! Client crashed with error: {e}")
+            if hasattr(self, 'sock') and self.sock:
+                self.send_crash_notification()
+                self.sock.close()
+            raise
     
     def run_continuous(self, epochs=None, batch_size=64):
         """Continuously run training sessions - reconnect after each completion"""
