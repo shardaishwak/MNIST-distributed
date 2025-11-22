@@ -11,13 +11,16 @@ interface ClientNodeData {
   connected: boolean;
   client_uuid?: string | null;
   client_address?: string | null;
+  crashed?: boolean;
+  waiting_replacement?: boolean;
 }
 
 function ClientNode({ data }: NodeProps<ClientNodeData>) {
-  const { clientId, status, epoch, totalEpochs, client_uuid, client_address } = data;
+  const { clientId, status, epoch, totalEpochs, client_uuid, client_address, crashed, waiting_replacement } = data;
 
   // Determine status color
   const getStatusColor = () => {
+    if (crashed || status === 'crashed') return 'bg-red-500';
     if (status === 'completed' || status === 'green') return 'bg-green-500';
     if (status === 'training' || status === 'connected') return 'bg-yellow-500';
     if (status === 'disconnected' || status === 'red') return 'bg-red-500';
@@ -25,6 +28,8 @@ function ClientNode({ data }: NodeProps<ClientNodeData>) {
   };
 
   const getStatusText = () => {
+    if (crashed && waiting_replacement) return 'Crashed - Awaiting Replacement';
+    if (crashed) return 'Crashed';
     if (status === 'completed') return 'Completed';
     if (status === 'training' || status === 'green') return 'Training';
     if (status === 'connected' || status === 'yellow') return 'Connected';
@@ -60,6 +65,18 @@ function ClientNode({ data }: NodeProps<ClientNodeData>) {
               From: <span className="font-mono text-gray-700">{client_address}</span>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Crash/Replacement Warning */}
+      {crashed && waiting_replacement && (
+        <div className="mb-2 pb-2 border-b border-red-200 bg-red-50 p-2 rounded">
+          <div className="text-xs text-red-700 font-semibold">
+            ⚠ Client Crashed
+          </div>
+          <div className="text-xs text-red-600 mt-1">
+            Waiting for replacement client...
+          </div>
         </div>
       )}
 

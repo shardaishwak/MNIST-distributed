@@ -244,6 +244,8 @@ export default function Home() {
                   connected: clientData.connected,
                   client_uuid: clientData.client_uuid,
                   client_address: clientData.client_address,
+                  crashed: clientData.crashed,
+                  waiting_replacement: clientData.waiting_replacement,
                 },
               };
             });
@@ -277,6 +279,8 @@ export default function Home() {
                             connected: clientData.connected,
                             client_uuid: clientData.client_uuid,
                             client_address: clientData.client_address,
+                            crashed: clientData.crashed,
+                            waiting_replacement: clientData.waiting_replacement,
                           },
                         };
                       }

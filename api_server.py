@@ -122,7 +122,9 @@ class APIDistributedServer(NetworkDistributedServer):
             'last_ping': time.time(), 
             'connected': False,
             'client_uuid': None,  # Will be set when client connects
-            'client_address': None  # Will be set when client connects
+            'client_address': None,
+            'crashed': False,
+            'waiting_replacement': False 
         } for i in range(num_clients)}
         # Initialize parent without loading data (we'll do it ourselves)
         self.host = host
@@ -134,6 +136,8 @@ class APIDistributedServer(NetworkDistributedServer):
         self.client_histories = []
         self.client_sizes = []
         self.lock = threading.Lock()
+        self.data_splits = []
+        self.failed_clients = {}
         # Don't call load_mnist_data - we'll use load_dataset_data instead
     
     def load_dataset_data(self):
@@ -173,62 +177,94 @@ class APIDistributedServer(NetworkDistributedServer):
         return compile_model_from_config(self.model_config, input_shape, self.num_classes)
     
     def handle_client(self, client_sock: socket.socket, client_id: int, data_split, client_address=None):
-        """Override to update status and handle progress updates"""
-        # Generate unique ID for this client connection
-        client_uuid = str(uuid.uuid4())[:8]  # Use first 8 chars for readability
+        """Override to update status and handle progress updates and crashes"""
+        client_uuid = str(uuid.uuid4())[:8] 
         
-        self.client_status[client_id]['connected'] = True
-        self.client_status[client_id]['status'] = 'connected'
-        self.client_status[client_id]['last_ping'] = time.time()
-        self.client_status[client_id]['client_uuid'] = client_uuid
-        self.client_status[client_id]['client_address'] = client_address
-        
-        print(f"Client {client_id} connected: UUID={client_uuid}, Address={client_address}")
-        
-        client_sock.settimeout(None)
-        x_split, y_split = data_split
-        package = {
-            'x_train': x_split, 
-            'y_train': y_split, 
-            'client_id': client_id, 
-            'model_config': self.get_model_config(),
-            'epochs': self.epochs_per_client
-        }
-        
-        send_bytes(client_sock, pickle.dumps(package, protocol=pickle.HIGHEST_PROTOCOL))
-        
-        self.client_status[client_id]['status'] = 'training'
-        
-        # Receive messages - could be progress updates or final weights
-        while True:
-            payload = recv_bytes(client_sock)
-            data = pickle.loads(payload)
+        try:
+            self.client_status[client_id]['connected'] = True
+            self.client_status[client_id]['status'] = 'connected'
+            self.client_status[client_id]['last_ping'] = time.time()
+            self.client_status[client_id]['client_uuid'] = client_uuid
+            self.client_status[client_id]['client_address'] = client_address
+            self.client_status[client_id]['crashed'] = False
+            self.client_status[client_id]['waiting_replacement'] = False
             
-            # Check if this is a progress update
-            if isinstance(data, dict) and data.get('type') == 'progress':
-                # Update epoch progress
-                epoch = data.get('epoch', 0)
-                self.client_status[client_id]['epoch'] = epoch
-                self.client_status[client_id]['last_ping'] = time.time()
-                print(f"Client {client_id} progress: epoch {epoch}/{self.epochs_per_client}")
-                continue
+            print(f"Client {client_id} connected: UUID={client_uuid}, Address={client_address}")
             
-            # Otherwise, this is the trained weights
-            trained_weights = data
-            break
-        
-        # Receive history
-        history_payload = recv_bytes(client_sock)
-        history_dict = pickle.loads(history_payload)
-        
-        with self.lock:
-            self.model_weights.append(trained_weights)
-            self.client_histories.append((client_id, history_dict))
-            self.client_sizes.append(len(x_split))
-        
-        self.client_status[client_id]['status'] = 'completed'
-        self.client_status[client_id]['epoch'] = self.epochs_per_client
-        client_sock.close()
+            client_sock.settimeout(None)
+            x_split, y_split = data_split
+            package = {
+                'x_train': x_split, 
+                'y_train': y_split, 
+                'client_id': client_id, 
+                'model_config': self.get_model_config(),
+                'epochs': self.epochs_per_client
+            }
+            
+            send_bytes(client_sock, pickle.dumps(package, protocol=pickle.HIGHEST_PROTOCOL))
+            
+            self.client_status[client_id]['status'] = 'training'
+            
+            while True:
+                payload = recv_bytes(client_sock)
+                data = pickle.loads(payload)
+                
+                if isinstance(data, dict) and data.get('type') == 'crash':
+                    print(f"! Client {client_id} (UUID={client_uuid}) sent crash notification")
+                    self.client_status[client_id]['crashed'] = True
+                    self.client_status[client_id]['status'] = 'crashed'
+                    self.client_status[client_id]['waiting_replacement'] = True
+                    with self.lock:
+                        self.failed_clients[client_id] = data_split
+                    client_sock.close()
+                    return
+                
+                if isinstance(data, dict) and data.get('type') == 'progress':
+                    epoch = data.get('epoch', 0)
+                    self.client_status[client_id]['epoch'] = epoch
+                    self.client_status[client_id]['last_ping'] = time.time()
+                    print(f"Client {client_id} progress: epoch {epoch}/{self.epochs_per_client}")
+                    continue
+                
+                trained_weights = data
+                break
+            
+            history_payload = recv_bytes(client_sock)
+            history_dict = pickle.loads(history_payload)
+            
+            with self.lock:
+                self.model_weights.append(trained_weights)
+                self.client_histories.append((client_id, history_dict))
+                self.client_sizes.append(len(x_split))
+            
+            self.client_status[client_id]['status'] = 'completed'
+            self.client_status[client_id]['epoch'] = self.epochs_per_client
+            client_sock.close()
+            
+        except (ConnectionError, ConnectionResetError, BrokenPipeError) as e:
+            print(f"! Client {client_id} (UUID={client_uuid}) disconnected unexpectedly: {e}")
+            self.client_status[client_id]['crashed'] = True
+            self.client_status[client_id]['status'] = 'crashed'
+            self.client_status[client_id]['waiting_replacement'] = True
+            self.client_status[client_id]['connected'] = False
+            with self.lock:
+                self.failed_clients[client_id] = data_split
+            try:
+                client_sock.close()
+            except:
+                pass
+        except Exception as e:
+            print(f"! Error handling client {client_id} (UUID={client_uuid}): {e}")
+            self.client_status[client_id]['crashed'] = True
+            self.client_status[client_id]['status'] = 'crashed'
+            self.client_status[client_id]['waiting_replacement'] = True
+            self.client_status[client_id]['connected'] = False
+            with self.lock:
+                self.failed_clients[client_id] = data_split
+            try:
+                client_sock.close()
+            except:
+                pass
     
     def start_server_async(self, session_id: str):
         """Start server in a separate thread"""
@@ -243,21 +279,51 @@ class APIDistributedServer(NetworkDistributedServer):
                 print(f"Server listening on {self.host}:{self.port} (expecting {self.num_clients} clients)")
 
                 splits = self.split_data()
-                threads = []
+                self.data_splits = splits 
+                threads = {}
+                
                 cid = 0
                 while cid < self.num_clients:
                     client_sock, client_address = srv.accept()
                     cid += 1
-                    # Format address as "IP:port"
                     addr_str = f"{client_address[0]}:{client_address[1]}" if client_address else "unknown"
                     t = threading.Thread(target=self.handle_client, args=(client_sock, cid, splits[cid - 1], addr_str), daemon=True)
                     t.start()
-                    threads.append(t)
-
-                for t in threads: 
-                    t.join()
-                if len(self.model_weights) != self.num_clients:
-                    raise RuntimeError(f"Expected {self.num_clients} models, got {len(self.model_weights)}")
+                    threads[cid] = t
+                
+                while True:
+                    for client_id in list(threads.keys()):
+                        threads[client_id].join(timeout=0.1)
+                        if not threads[client_id].is_alive():
+                            del threads[client_id]
+                    
+                    with self.lock:
+                        failed_client_ids = list(self.failed_clients.keys())
+                    
+                    if failed_client_ids:
+                        for failed_id in failed_client_ids:
+                            print(f"Waiting for replacement client for slot {failed_id}...")
+                            client_sock, client_address = srv.accept()
+                            addr_str = f"{client_address[0]}:{client_address[1]}" if client_address else "unknown"
+                            print(f"Replacement client connected for slot {failed_id}")
+                            
+                            with self.lock:
+                                data_split = self.failed_clients.pop(failed_id)
+                            
+                            self.client_status[failed_id]['crashed'] = False
+                            self.client_status[failed_id]['waiting_replacement'] = False
+                            self.client_status[failed_id]['epoch'] = 0
+                            
+                            t = threading.Thread(target=self.handle_client, args=(client_sock, failed_id, data_split, addr_str), daemon=True)
+                            t.start()
+                            threads[failed_id] = t
+                    
+                    if len(self.model_weights) == self.num_clients and len(threads) == 0:
+                        break
+                    
+                    time.sleep(0.5)
+                
+                print(f"All {self.num_clients} clients completed successfully")
 
                 aggregated = self.federated_averaging()
                 self.evaluate_and_visualize_to_session(aggregated, session_id)
@@ -552,7 +618,9 @@ def start_training():
                 'last_ping': time.time(),
                 'connected': False,
                 'client_uuid': None,
-                'client_address': None
+                'client_address': None,
+                'crashed': False,
+                'waiting_replacement': False
             }
         
         return jsonify({'message': 'Training started', 'num_clients': num_clients, 'session_id': session_id})

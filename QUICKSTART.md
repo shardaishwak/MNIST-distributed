@@ -105,6 +105,46 @@ Then in the dashboard, you can:
 
 **Note:** Press Ctrl+C on any client to stop it. The client shows a session counter (SESSION 1, SESSION 2, etc.) to track how many training rounds it has participated in.
 
+## Fault Tolerance (Client Crash Recovery)
+
+**NEW FEATURE**: The system now handles client crashes gracefully!
+
+### What Happens When a Client Crashes?
+
+1. **Client sends crash notification** to server (if possible)
+2. **Dashboard shows "Crashed - Awaiting Replacement"** status in red
+3. **Server waits for a replacement client** to connect
+4. **Replacement client takes over** the same data split
+5. **Training completes** once all slots finish successfully
+
+### Example: Replacing a Crashed Client
+
+```bash
+# Start 3 clients for training
+python distributed_client.py localhost 8888  # Terminal 1
+python distributed_client.py localhost 8888  # Terminal 2
+python distributed_client.py localhost 8888  # Terminal 3
+
+# Start training in dashboard...
+
+# One client crashes (Terminal 2: Ctrl+C)
+# Dashboard shows: "Client 2: Crashed - Awaiting Replacement"
+
+# Start a replacement client
+python distributed_client.py localhost 8888  # Terminal 4
+
+# Replacement automatically takes over Client 2's slot
+# Training continues and completes normally!
+```
+
+**Benefits:**
+- Training doesn't fail if a client crashes
+- No manual intervention needed
+- Dashboard shows clear visual indicators
+- Replacement starts from scratch with same data
+
+See `FAULT_TOLERANCE.md` for detailed documentation.
+
 ## Common Issues
 
 ### "Server listening on 0.0.0.0:8888 (expecting X clients)" but nothing happens
