@@ -8,6 +8,7 @@ import threading
 import time
 import socket
 import pickle
+import uuid
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from typing import Dict, List, Optional
@@ -114,9 +115,15 @@ class APIDistributedServer(NetworkDistributedServer):
         self.dataset_name = dataset_name
         self.model_config = model_config
         self.epochs_per_client = epochs_per_client
-        self.client_status = {i+1: {'status': 'waiting', 'epoch': 0, 'total_epochs': epochs_per_client, 
-                                    'last_ping': time.time(), 'connected': False} 
-                              for i in range(num_clients)}
+        self.client_status = {i+1: {
+            'status': 'waiting', 
+            'epoch': 0, 
+            'total_epochs': epochs_per_client, 
+            'last_ping': time.time(), 
+            'connected': False,
+            'client_uuid': None,  # Will be set when client connects
+            'client_address': None  # Will be set when client connects
+        } for i in range(num_clients)}
         # Initialize parent without loading data (we'll do it ourselves)
         self.host = host
         self.port = port
@@ -165,11 +172,18 @@ class APIDistributedServer(NetworkDistributedServer):
         input_shape = self.x_train.shape[1:]
         return compile_model_from_config(self.model_config, input_shape, self.num_classes)
     
-    def handle_client(self, client_sock: socket.socket, client_id: int, data_split):
+    def handle_client(self, client_sock: socket.socket, client_id: int, data_split, client_address=None):
         """Override to update status and handle progress updates"""
+        # Generate unique ID for this client connection
+        client_uuid = str(uuid.uuid4())[:8]  # Use first 8 chars for readability
+        
         self.client_status[client_id]['connected'] = True
         self.client_status[client_id]['status'] = 'connected'
         self.client_status[client_id]['last_ping'] = time.time()
+        self.client_status[client_id]['client_uuid'] = client_uuid
+        self.client_status[client_id]['client_address'] = client_address
+        
+        print(f"Client {client_id} connected: UUID={client_uuid}, Address={client_address}")
         
         client_sock.settimeout(None)
         x_split, y_split = data_split
@@ -232,9 +246,11 @@ class APIDistributedServer(NetworkDistributedServer):
                 threads = []
                 cid = 0
                 while cid < self.num_clients:
-                    client_sock, _ = srv.accept()
+                    client_sock, client_address = srv.accept()
                     cid += 1
-                    t = threading.Thread(target=self.handle_client, args=(client_sock, cid, splits[cid - 1]), daemon=True)
+                    # Format address as "IP:port"
+                    addr_str = f"{client_address[0]}:{client_address[1]}" if client_address else "unknown"
+                    t = threading.Thread(target=self.handle_client, args=(client_sock, cid, splits[cid - 1], addr_str), daemon=True)
                     t.start()
                     threads.append(t)
 
@@ -534,7 +550,9 @@ def start_training():
                 'epoch': 0,
                 'total_epochs': epochs_per_client,
                 'last_ping': time.time(),
-                'connected': False
+                'connected': False,
+                'client_uuid': None,
+                'client_address': None
             }
         
         return jsonify({'message': 'Training started', 'num_clients': num_clients, 'session_id': session_id})

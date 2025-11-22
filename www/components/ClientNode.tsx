@@ -9,10 +9,12 @@ interface ClientNodeData {
   epoch: number;
   totalEpochs: number;
   connected: boolean;
+  client_uuid?: string | null;
+  client_address?: string | null;
 }
 
 function ClientNode({ data }: NodeProps<ClientNodeData>) {
-  const { clientId, status, epoch, totalEpochs, connected } = data;
+  const { clientId, status, epoch, totalEpochs, client_uuid, client_address } = data;
 
   // Determine status color
   const getStatusColor = () => {
@@ -46,6 +48,20 @@ function ClientNode({ data }: NodeProps<ClientNodeData>) {
           <span className="text-xs text-gray-600">{getStatusText()}</span>
         </div>
       </div>
+
+      {/* Client UUID and Address */}
+      {client_uuid && (
+        <div className="mb-2 pb-2 border-b border-gray-200">
+          <div className="text-xs text-gray-500">
+            ID: <span className="font-mono font-semibold text-indigo-600">{client_uuid}</span>
+          </div>
+          {client_address && (
+            <div className="text-xs text-gray-500 mt-1">
+              From: <span className="font-mono text-gray-700">{client_address}</span>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="space-y-2">
         <div className="text-sm text-gray-600">

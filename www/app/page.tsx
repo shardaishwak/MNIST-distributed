@@ -194,6 +194,8 @@ export default function Home() {
                   epoch: clientData.epoch,
                   totalEpochs: clientData.total_epochs,
                   connected: clientData.connected,
+                  client_uuid: clientData.client_uuid,
+                  client_address: clientData.client_address,
                 },
               };
             });
@@ -225,6 +227,8 @@ export default function Home() {
                             epoch: clientData.epoch,
                             totalEpochs: clientData.total_epochs,
                             connected: clientData.connected,
+                            client_uuid: clientData.client_uuid,
+                            client_address: clientData.client_address,
                           },
                         };
                       }

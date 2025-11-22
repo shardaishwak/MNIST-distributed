@@ -109,12 +109,12 @@ function ResultsNode({ data }: NodeProps<ResultsNodeData>) {
             >
               {downloading ? (
                 <>
-                  <span className="animate-spin">⏳</span>
+                  <span className="animate-spin"></span>
                   Downloading...
                 </>
               ) : (
                 <>
-                  <span>📥</span>
+                  <span></span>
                   Download Trained Model
                 </>
               )}
