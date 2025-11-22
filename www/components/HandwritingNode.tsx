@@ -167,7 +167,7 @@ function HandwritingNode({ data }: NodeProps<HandwritingNodeData>) {
 
   return (
     <div className="px-6 py-4 shadow-xl rounded-lg border-2 border-purple-400 bg-white min-w-[400px]">
-      <Handle type="target" position={Position.Top} />
+      <Handle type="target" position={Position.Left} />
       
       <div className="space-y-4">
         <div className="flex items-center gap-2 mb-3">
