@@ -33,6 +33,20 @@ function HandwritingNode({ data }: NodeProps<HandwritingNodeData>) {
     ctx.fillRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
   }, []);
 
+  const getCanvasCoordinates = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
+    
+    return { x, y };
+  };
+
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
     e.stopPropagation(); // Prevent ReactFlow from capturing this event
     e.preventDefault();
@@ -40,9 +54,7 @@ function HandwritingNode({ data }: NodeProps<HandwritingNodeData>) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const { x, y } = getCanvasCoordinates(e);
     
     setIsDrawing(true);
     setLastX(x);
@@ -60,9 +72,7 @@ function HandwritingNode({ data }: NodeProps<HandwritingNodeData>) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const { x, y } = getCanvasCoordinates(e);
     
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
@@ -192,6 +202,7 @@ function HandwritingNode({ data }: NodeProps<HandwritingNodeData>) {
               onMouseUp={stopDrawing}
               onMouseLeave={stopDrawing}
               className="block"
+              style={{ width: `${CANVAS_SIZE}px`, height: `${CANVAS_SIZE}px` }}
             />
           </div>
 
