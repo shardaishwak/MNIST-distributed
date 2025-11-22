@@ -18,6 +18,7 @@ import TrainingParamsNode from '@/components/TrainingParamsNode';
 import RunNode from '@/components/RunNode';
 import ClientNode from '@/components/ClientNode';
 import ResultsNode from '@/components/ResultsNode';
+import HandwritingNode from '@/components/HandwritingNode';
 
 const API_BASE_URL = 'http://localhost:5001/api';
 
@@ -28,6 +29,7 @@ const nodeTypes = {
   run: RunNode,
   client: ClientNode,
   results: ResultsNode,
+  handwriting: HandwritingNode,
 };
 
 export default function Home() {
@@ -293,7 +295,7 @@ export default function Home() {
         
         if (response.data.status === 'completed') {
           setIsTraining(false);
-          // Replace client nodes with results node
+          // Replace client nodes with results node and add handwriting node
           if (response.data.session_id) {
             const resultsNode: Node = {
               id: 'results',
@@ -305,13 +307,24 @@ export default function Home() {
               },
             };
 
-            // Remove client nodes and add results node
+            const handwritingNode: Node = {
+              id: 'handwriting',
+              type: 'handwriting',
+              position: { x: 1150, y: 750 },
+              data: {
+                sessionId: response.data.session_id,
+                apiBaseUrl: API_BASE_URL,
+              },
+            };
+
+            // Remove client nodes and add results + handwriting nodes
             setNodes((nds) => [
               ...nds.filter((n) => !n.id.startsWith('client-')),
               resultsNode,
+              handwritingNode,
             ]);
 
-            // Update edges to connect run to results
+            // Update edges to connect run to results, and results to handwriting
             setEdges((eds) => [
               ...eds.filter((e) => !e.source.startsWith('run') || !e.target.startsWith('client-')),
               {
@@ -321,6 +334,14 @@ export default function Home() {
                 type: 'smoothstep',
                 animated: false,
                 style: { stroke: '#10b981', strokeWidth: 3 },
+              },
+              {
+                id: 'results-handwriting',
+                source: 'results',
+                target: 'handwriting',
+                type: 'smoothstep',
+                animated: false,
+                style: { stroke: '#9333ea', strokeWidth: 2 },
               },
             ]);
           }
