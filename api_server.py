@@ -607,6 +607,15 @@ def stop_training():
     training_state['status'] = 'idle'
     return jsonify({'message': 'Training stopped'})
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint to verify server is running"""
+    return jsonify({
+        'status': 'ok',
+        'message': 'API server is running',
+        'timestamp': time.time()
+    })
+
 @app.route('/api/results/<session_id>/confusion_matrix', methods=['GET'])
 def get_confusion_matrix(session_id):
     """Get confusion matrix image for a session"""

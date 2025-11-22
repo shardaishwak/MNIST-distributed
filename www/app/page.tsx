@@ -38,6 +38,8 @@ export default function Home() {
   const [isTraining, setIsTraining] = useState<boolean>(false);
   const [clientNodesCreated, setClientNodesCreated] = useState<boolean>(false);
   const [sessionId, setSessionId] = useState<string>(''); // eslint-disable-line @typescript-eslint/no-unused-vars
+  const [serverStatus, setServerStatus] = useState<string>('idle'); // idle, running, completed, error
+  const [apiConnected, setApiConnected] = useState<boolean>(false); // API server connectivity
 
   const handleStartTraining = useCallback(async () => {
     if (!selectedDataset || !modelConfig) {
@@ -48,6 +50,7 @@ export default function Home() {
     try {
       setIsTraining(true);
       setClientNodesCreated(false);
+      setServerStatus('running');
       
       const response = await axios.post(`${API_BASE_URL}/training/start`, {
         dataset: selectedDataset,
@@ -65,6 +68,7 @@ export default function Home() {
         : 'Failed to start training';
       alert(errorMessage);
       setIsTraining(false);
+      setServerStatus('error');
     }
   }, [selectedDataset, modelConfig, numClients, epochsPerClient]);
 
@@ -165,6 +169,47 @@ export default function Home() {
     });
   }, [selectedDataset, modelConfig, numClients, epochsPerClient, isTraining, handleStartTraining, setNodes]);
 
+  // Poll for API server connectivity
+  useEffect(() => {
+    const checkApiHealth = async () => {
+      try {
+        await axios.get(`${API_BASE_URL}/health`, { timeout: 3000 });
+        setApiConnected(true);
+      } catch (error) {
+        console.error('API server not reachable:', error);
+        setApiConnected(false);
+      }
+    };
+
+    // Check immediately on mount
+    checkApiHealth();
+
+    // Then check every 3 seconds
+    const healthInterval = setInterval(checkApiHealth, 3000);
+
+    return () => clearInterval(healthInterval);
+  }, []);
+
+  // Poll for server status (always, even when not training)
+  useEffect(() => {
+    const pollStatus = async () => {
+      try {
+        const response = await axios.get(`${API_BASE_URL}/training/status`);
+        setServerStatus(response.data.status || 'idle');
+      } catch (error) {
+        console.error('Error polling server status:', error);
+      }
+    };
+
+    // Poll immediately on mount
+    pollStatus();
+
+    // Then poll every 2 seconds
+    const statusInterval = setInterval(pollStatus, 2000);
+
+    return () => clearInterval(statusInterval);
+  }, []);
+
   // Poll for training status
   useEffect(() => {
     if (!isTraining) return;
@@ -172,6 +217,9 @@ export default function Home() {
     const interval = setInterval(async () => {
       try {
         const response = await axios.get(`${API_BASE_URL}/training/status`);
+        
+        // Update server status
+        setServerStatus(response.data.status || 'idle');
         
         // Update or create client nodes based on status
         if (response.data.clients) {
@@ -283,12 +331,61 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [isTraining, clientNodesCreated, setNodes, setEdges]);
 
+  // Helper function to get server status badge style
+  const getServerStatusStyle = () => {
+    switch (serverStatus) {
+      case 'running':
+        return { bg: 'bg-green-100', text: 'text-green-800', dot: 'bg-green-500', label: 'Server Active' };
+      case 'completed':
+        return { bg: 'bg-blue-100', text: 'text-blue-800', dot: 'bg-blue-500', label: 'Completed' };
+      case 'error':
+        return { bg: 'bg-red-100', text: 'text-red-800', dot: 'bg-red-500', label: 'Error' };
+      default: // idle
+        return { bg: 'bg-gray-100', text: 'text-gray-800', dot: 'bg-gray-400', label: 'Server Idle' };
+    }
+  };
+
+  const statusStyle = getServerStatusStyle();
+
   return (
     <div className="flex h-screen w-full flex-col bg-gray-50">
       {/* Header */}
       <header className="bg-white shadow-sm border-b border-gray-200 px-6 py-4">
-        <h1 className="text-2xl font-bold text-gray-900">Federated Learning Dashboard</h1>
-        <p className="text-sm text-gray-600 mt-1">Configure and monitor your federated learning training</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">Federated Learning Dashboard</h1>
+            <p className="text-sm text-gray-600 mt-1">Configure and monitor your federated learning training</p>
+          </div>
+          
+          {/* Status Indicators */}
+          <div className="flex items-center gap-3">
+            {/* API Server Connectivity */}
+            <div className={`flex items-center gap-2 px-4 py-2 rounded-full ${
+              apiConnected 
+                ? 'bg-green-100' 
+                : 'bg-red-100'
+            }`}>
+              <div className={`w-3 h-3 rounded-full ${
+                apiConnected 
+                  ? 'bg-green-500 animate-pulse' 
+                  : 'bg-red-500'
+              }`}></div>
+              <span className={`text-sm font-semibold ${
+                apiConnected 
+                  ? 'text-green-800' 
+                  : 'text-red-800'
+              }`}>
+                {apiConnected ? 'API Connected' : 'API Disconnected'}
+              </span>
+            </div>
+
+            {/* Training Server Status */}
+            <div className={`flex items-center gap-2 px-4 py-2 rounded-full ${statusStyle.bg}`}>
+              <div className={`w-3 h-3 rounded-full ${statusStyle.dot} ${serverStatus === 'running' ? 'animate-pulse' : ''}`}></div>
+              <span className={`text-sm font-semibold ${statusStyle.text}`}>{statusStyle.label}</span>
+            </div>
+          </div>
+        </div>
       </header>
 
       {/* Main Content - React Flow */}
