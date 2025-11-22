@@ -24,12 +24,13 @@ def recv_bytes(sock: socket.socket) -> bytes:
     return recvn(size)
 
 class NetworkDistributedServer:
-    def __init__(self, host='0.0.0.0', port=8888, num_clients=2, public_holdout=8000, server_finetune_epochs=2):
+    def __init__(self, host='0.0.0.0', port=8888, num_clients=2, public_holdout=8000, server_finetune_epochs=2, client_epochs=5):
         self.host = host
         self.port = port
         self.num_clients = num_clients
         self.public_holdout = public_holdout
         self.server_finetune_epochs = server_finetune_epochs
+        self.client_epochs = client_epochs
         self.model_weights = []
         self.client_histories = []
         self.client_sizes = []
@@ -113,7 +114,13 @@ class NetworkDistributedServer:
     def handle_client(self, client_sock: socket.socket, client_id: int, data_split):
         client_sock.settimeout(None)
         x_split, y_split = data_split
-        package = {'x_train': x_split, 'y_train': y_split, 'client_id': client_id, 'model_config': self.get_model_config()}
+        package = {
+            'x_train': x_split, 
+            'y_train': y_split, 
+            'client_id': client_id, 
+            'model_config': self.get_model_config(),
+            'epochs': self.client_epochs
+        }
         send_bytes(client_sock, pickle.dumps(package, protocol=pickle.HIGHEST_PROTOCOL))
 
         weights_payload = recv_bytes(client_sock)
@@ -191,7 +198,14 @@ class NetworkDistributedServer:
         self.evaluate_and_visualize(aggregated)
 
 def main():
-    server = NetworkDistributedServer(host='0.0.0.0', port=8888, num_clients=3, public_holdout=8000, server_finetune_epochs=2)
+    server = NetworkDistributedServer(
+        host='0.0.0.0', 
+        port=8888, 
+        num_clients=3, 
+        public_holdout=8000, 
+        server_finetune_epochs=2,
+        client_epochs=5
+    )
     server.start_server()
 
 if __name__ == "__main__":
