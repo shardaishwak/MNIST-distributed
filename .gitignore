@@ -1,2 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+*.egg-info/
+
+# Training outputs
+outputs/
 *.keras
-venv
+*.png
+*.npz
+
+# IDE
+.vscode/
+.idea/
+
+# Node
+node_modules/
+.next/
+.vercel
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
