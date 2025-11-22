@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Flask API server for federated learning management with distributed balancing
+Flask API server for federated learning management
 """
 import os
 import json
@@ -21,7 +21,7 @@ from tensorflow.keras.utils import to_categorical
 import matplotlib
 matplotlib.use('Agg')
 
-from distributed_server import send_bytes, recv_bytes
+from distributed_server import NetworkDistributedServer, send_bytes, recv_bytes
 
 app = Flask(__name__)
 CORS(app)
@@ -102,8 +102,8 @@ def compile_model_from_config(model_config: dict, input_shape: tuple, num_classe
     model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
     return model
 
-class APIDistributedServer:
-    """Extended server class that works with API and supports distributed balancing"""
+class APIDistributedServer(NetworkDistributedServer):
+    """Extended server class that works with API"""
     
     def __init__(self, dataset_name: str, model_config: dict, num_clients: int, 
                  epochs_per_client: int, host='0.0.0.0', port=8888, 
@@ -123,6 +123,7 @@ class APIDistributedServer:
             'crashed': False,
             'waiting_replacement': False 
         } for i in range(num_clients)}
+        # Initialize parent without loading data (we'll do it ourselves)
         self.host = host
         self.port = port
         self.num_clients = num_clients
@@ -235,7 +236,7 @@ class APIDistributedServer:
         return class_weights
     
     def handle_client(self, client_sock: socket.socket, client_id: int, data_split, client_address=None):
-        """Handle client connection with balancing support"""
+        """Override to update status and handle progress updates and crashes"""
         client_uuid = str(uuid.uuid4())[:8]
         completed_successfully = False
         
@@ -498,8 +499,8 @@ class APIDistributedServer:
 
         y_true = np.argmax(self.y_test, axis=1)
         y_pred = np.argmax(model.predict(self.x_test, verbose=0), axis=1)
-        cm = confusion_matrix(y_true, y_pred, labels=list(range(self.num_classes)))
-        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=list(range(self.num_classes)))
+        cm = confusion_matrix(y_true, y_pred, labels=list(range(10)))
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=list(range(10)))
         plt.figure(figsize=(8, 8))
         disp.plot(values_format='d', cmap='Blues', colorbar=True)
         plt.title(f'Confusion Matrix - Accuracy: {acc:.2%}')
@@ -713,7 +714,7 @@ def start_training():
             'session_id': session_id,
         }
         
-        # Create and start server with balancing option
+        # Create and start server
         server = APIDistributedServer(
             dataset_name=dataset_name,
             model_config=model_config,

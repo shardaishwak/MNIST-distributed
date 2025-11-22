@@ -32,9 +32,10 @@ class EpochProgressCallback(Callback):
             progress_msg = {
                 'type': 'progress',
                 'client_id': self.client_id,
-                'epoch': epoch + 1,
+                'epoch': epoch + 1, # Convert to 1-indexed
                 'logs': logs or {}
             }
+            # Use a non-blocking send for progress updates
             try:
                 send_bytes(self.sock, pickle.dumps(progress_msg, protocol=pickle.HIGHEST_PROTOCOL))
             except Exception as e:
@@ -101,7 +102,7 @@ class NetworkDistributedClient:
         self.x_train, self.y_train = pkg['x_train'], pkg['y_train']
         self.client_id = pkg['client_id']
         cfg = pkg['model_config']
-        self.epochs = pkg.get('epochs', 5)
+        self.epochs = pkg.get('epochs', 5)  # Get epochs from server, default to 5
 
         local_dist = self.compute_label_distribution()
         
