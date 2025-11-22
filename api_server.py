@@ -107,10 +107,11 @@ class APIDistributedServer(NetworkDistributedServer):
     
     def __init__(self, dataset_name: str, model_config: dict, num_clients: int, 
                  epochs_per_client: int, host='0.0.0.0', port=8888, 
-                 public_holdout=8000, server_finetune_epochs=2):
+                 public_holdout=8000, server_finetune_epochs=2, use_balancing=True):
         self.dataset_name = dataset_name
         self.model_config = model_config
         self.epochs_per_client = epochs_per_client
+        self.use_balancing = use_balancing
         self.client_status = {i+1: {
             'status': 'waiting', 
             'epoch': 0, 
@@ -131,7 +132,10 @@ class APIDistributedServer(NetworkDistributedServer):
         self.model_weights = []
         self.client_histories = []
         self.client_sizes = []
+        self.client_label_dists = []
+        self.client_socks = []
         self.lock = threading.Lock()
+        self.clients_connected = threading.Event()
         self.data_splits = []
         self.failed_clients = {}
     
@@ -167,6 +171,70 @@ class APIDistributedServer(NetworkDistributedServer):
         input_shape = self.x_train.shape[1:]
         return compile_model_from_config(self.model_config, input_shape, self.num_classes)
     
+    def get_model_config(self):
+        """Get model config for sending to clients"""
+        base = self.create_base_model()
+        return {'model_json': base.to_json(), 'initial_weights': base.get_weights()}
+    
+    def split_data(self, shuffle_seed: int = 42):
+        """Split data among clients (balanced per class)"""
+        labels = np.argmax(self.y_train, axis=1)
+        rng = np.random.default_rng(shuffle_seed)
+        per_class_indices = []
+        for c in range(self.num_classes):
+            idx = np.where(labels == c)[0]
+            rng.shuffle(idx)
+            per_class_indices.append(idx)
+
+        client_indices = [[] for _ in range(self.num_clients)]
+        for c_idx in per_class_indices:
+            parts = np.array_split(c_idx, self.num_clients)
+            for i in range(self.num_clients):
+                if len(parts[i]) > 0:
+                    client_indices[i].extend(parts[i].tolist())
+
+        splits = []
+        for i in range(self.num_clients):
+            rng.shuffle(client_indices[i])
+            idxs = np.array(client_indices[i], dtype=np.int64)
+            splits.append((self.x_train[idxs], self.y_train[idxs]))
+        return splits
+    
+    def compute_global_class_weights(self):
+        """Compute class weights based on global label distribution across all clients"""
+        global_counts = np.zeros(self.num_classes)
+        for dist in self.client_label_dists:
+            for c in range(self.num_classes):
+                global_counts[c] += dist.get(c, 0)
+        
+        total = global_counts.sum()
+        if total == 0:
+            return {c: 1.0 for c in range(self.num_classes)}
+        
+        # Inverse frequency weighting: weight = total / (num_classes * class_count)
+        class_weights = {}
+        for c in range(self.num_classes):
+            if global_counts[c] > 0:
+                class_weights[c] = total / (self.num_classes * global_counts[c])
+            else:
+                class_weights[c] = 1.0
+        
+        # Normalize so min weight is 1.0
+        min_weight = min(class_weights.values())
+        for c in range(self.num_classes):
+            class_weights[c] /= min_weight
+        
+        print("\n=== Global Class Weights ===")
+        print("Global Label Counts:")
+        for c in range(self.num_classes):
+            print(f"  Class {c}: {int(global_counts[c])}")
+        print("\nClass Weights:")
+        for c in range(self.num_classes):
+            print(f"  Class {c}: {class_weights[c]:.4f}")
+        print("=" * 30 + "\n")
+        
+        return class_weights
+    
     def handle_client(self, client_sock: socket.socket, client_id: int, data_split, client_address=None):
         """Override to update status and handle progress updates and crashes"""
         client_uuid = str(uuid.uuid4())[:8]
@@ -194,6 +262,61 @@ class APIDistributedServer(NetworkDistributedServer):
             }
             
             send_bytes(client_sock, pickle.dumps(package, protocol=pickle.HIGHEST_PROTOCOL))
+            
+            print(f"Client {client_id} waiting for all clients to connect...")
+            
+            # BALANCING: Receive label distribution from client
+            if self.use_balancing:
+                label_dist = pickle.loads(recv_bytes(client_sock))
+                
+                with self.lock:
+                    self.client_label_dists.append(label_dist)
+                    self.client_socks.append(client_sock)
+                    num_connected = len(self.client_socks)
+                
+                print(f"Client {client_id} reported label distribution. Connected: {num_connected}/{self.num_clients}")
+                
+                # Wait until all clients have connected and reported their distributions
+                if num_connected == self.num_clients:
+                    print(f"All clients connected! Computing global class weights...")
+                    # Compute global class weights
+                    global_class_weights = self.compute_global_class_weights()
+                    
+                    # Send computed weights to all waiting clients
+                    with self.lock:
+                        for sock in self.client_socks:
+                            send_bytes(sock, pickle.dumps(global_class_weights, protocol=pickle.HIGHEST_PROTOCOL))
+                    
+                    print(f"Global weights sent to all clients. Starting training...")
+                    self.clients_connected.set()
+                else:
+                    # Wait for signal that all clients are connected
+                    print(f"Client {client_id} waiting for other clients...")
+                    self.clients_connected.wait()
+                    print(f"Client {client_id} received signal to proceed")
+            else:
+                # No balancing, but still wait for all clients to connect
+                # I will change this part before we submit, coudlnt get it to work otherwise.
+                with self.lock:
+                    self.client_socks.append(client_sock)
+                    num_connected = len(self.client_socks)
+                
+                print(f"Client {client_id} connected. Waiting for all clients: {num_connected}/{self.num_clients}")
+                
+                if num_connected == self.num_clients:
+                    # Send dummy weights (all 1.0) to all clients
+                    dummy_weights = {c: 1.0 for c in range(self.num_classes)}
+                    with self.lock:
+                        for sock in self.client_socks:
+                            send_bytes(sock, pickle.dumps(dummy_weights, protocol=pickle.HIGHEST_PROTOCOL))
+                    
+                    print(f"All clients connected. Sent dummy weights. Starting training...")
+                    self.clients_connected.set()
+                else:
+                    # Wait for signal that all clients are connected
+                    print(f"Client {client_id} waiting for other clients...")
+                    self.clients_connected.wait()
+                    print(f"Client {client_id} received signal to proceed")
             
             self.client_status[client_id]['status'] = 'training'
             
@@ -263,6 +386,17 @@ class APIDistributedServer(NetworkDistributedServer):
             except:
                 pass
     
+    def federated_averaging(self):
+        """Federated averaging with weighted aggregation"""
+        sizes = np.array(self.client_sizes, dtype=np.float64)
+        sizes = sizes / sizes.sum()
+
+        avg = [np.zeros_like(w, dtype=w.dtype) for w in self.model_weights[0]]
+        for w, alpha in zip(self.model_weights, sizes):
+            for i in range(len(w)):
+                avg[i] += alpha * w[i]
+        return avg
+    
     def start_server_async(self, session_id: str):
         """Start server in a separate thread"""
         def run():
@@ -273,6 +407,7 @@ class APIDistributedServer(NetworkDistributedServer):
                 srv.bind((self.host, self.port))
                 srv.listen(self.num_clients)
                 print(f"Server listening on {self.host}:{self.port} (expecting {self.num_clients} clients)")
+                print(f"Balancing enabled: {self.use_balancing}")
 
                 splits = self.split_data()
                 self.data_splits = splits 
@@ -380,6 +515,7 @@ class APIDistributedServer(NetworkDistributedServer):
             'num_clients': self.num_clients,
             'epochs_per_client': self.epochs_per_client,
             'dataset': self.dataset_name,
+            'balancing_enabled': self.use_balancing,
         }
         metrics_path = os.path.join(session_dir, 'metrics.json')
         with open(metrics_path, 'w') as f:
@@ -418,6 +554,10 @@ class APIDistributedServer(NetworkDistributedServer):
         plt.savefig(os.path.join(session_dir, f'client{client_id}_loss.png'), dpi=150)
         plt.close()
 
+# ============================================================================
+# API Routes
+# ============================================================================
+
 @app.route('/api/datasets', methods=['GET'])
 def get_datasets():
     """Get list of available datasets"""
@@ -447,7 +587,6 @@ def get_default_model():
             Dense(10, activation='softmax')
         ])
         
-        # Return the model JSON in the expected format
         return jsonify({
             'model_json': model.to_json(),
             'optimizer': {
@@ -500,7 +639,6 @@ def get_model_config():
             model_config = json.loads(model_json_str)
             if not isinstance(model_config, dict):
                 return jsonify({'error': 'model_json must be a JSON object (dict)'}), 400
-            # Check if it has the expected Keras model structure
             if 'className' not in model_config and 'config' not in model_config:
                 return jsonify({'error': 'model_json does not appear to be a valid Keras model JSON'}), 400
         except json.JSONDecodeError as e:
@@ -558,6 +696,7 @@ def start_training():
         model_config = data.get('model_config')
         num_clients = int(data.get('num_clients', 2))
         epochs_per_client = int(data.get('epochs_per_client', 5))
+        use_balancing = data.get('use_balancing', True)
         
         if isinstance(model_config, str):
             model_config = json.loads(model_config)
@@ -582,7 +721,8 @@ def start_training():
             num_clients=num_clients,
             epochs_per_client=epochs_per_client,
             host='0.0.0.0',
-            port=8888
+            port=8888,
+            use_balancing=use_balancing
         )
         
         training_state['server'] = server
@@ -601,7 +741,12 @@ def start_training():
                 'waiting_replacement': False
             }
         
-        return jsonify({'message': 'Training started', 'num_clients': num_clients, 'session_id': session_id})
+        return jsonify({
+            'message': 'Training started', 
+            'num_clients': num_clients, 
+            'session_id': session_id,
+            'balancing_enabled': use_balancing
+        })
     except Exception as e:
         training_state['status'] = 'error'
         return jsonify({'error': str(e)}), 500
@@ -703,4 +848,3 @@ if __name__ == '__main__':
     ensure_datasets_dir()
     ensure_outputs_dir()
     app.run(host='0.0.0.0', port=5001, debug=True)
-

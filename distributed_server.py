@@ -34,7 +34,10 @@ class NetworkDistributedServer:
         self.model_weights = []
         self.client_histories = []
         self.client_sizes = []
+        self.client_label_dists = []
+        self.client_socks = []
         self.lock = threading.Lock()
+        self.clients_connected = threading.Event()
         self.load_mnist_data()
 
     def load_mnist_data(self):
@@ -54,8 +57,6 @@ class NetworkDistributedServer:
 
         ph = min(self.public_holdout, len(x_train)//5)
         self.x_public, self.y_public = x_train[:ph], y_train_oh[:ph]
-        self.x_train, self.y_train= x_train[ph:], y_train_oh[ph:]
-        self.x_test,self.y_test = x_test, y_test_oh
 
     def create_base_model(self):
         model = Sequential([
@@ -100,6 +101,41 @@ class NetworkDistributedServer:
             splits.append((self.x_train[idxs], self.y_train[idxs]))
         return splits
 
+    def compute_global_class_weights(self):
+        """Compute class weights based on global label distribution across all clients"""
+        global_counts = np.zeros(10)
+        for dist in self.client_label_dists:
+            for c in range(10):
+                global_counts[c] += dist.get(c, 0)
+        
+        total = global_counts.sum()
+        if total == 0:
+            return {c: 1.0 for c in range(10)}
+        
+        # Inverse frequency weighting: weight = total / (num_classes * class_count)
+        class_weights = {}
+        for c in range(10):
+            if global_counts[c] > 0:
+                class_weights[c] = total / (10 * global_counts[c])
+            else:
+                class_weights[c] = 1.0
+        
+        # Normalize so min weight is 1.0
+        min_weight = min(class_weights.values())
+        for c in range(10):
+            class_weights[c] /= min_weight
+        
+        print("\n=== Global Class Weights ===")
+        print("Global Label Counts:")
+        for c in range(10):
+            print(f"  Class {c}: {int(global_counts[c])}")
+        print("\nClass Weights:")
+        for c in range(10):
+            print(f"  Class {c}: {class_weights[c]:.4f}")
+        print("=" * 30 + "\n")
+        
+        return class_weights
+
     def _plot_client_history(self, hist: dict, client_id: int):
         plt.figure(); plt.plot(hist['accuracy'], label='train_acc')
         if 'val_accuracy' in hist: plt.plot(hist['val_accuracy'], label='val_acc')
@@ -123,6 +159,29 @@ class NetworkDistributedServer:
         }
         send_bytes(client_sock, pickle.dumps(package, protocol=pickle.HIGHEST_PROTOCOL))
 
+        # Receive label distribution from client
+        label_dist = pickle.loads(recv_bytes(client_sock))
+        
+        with self.lock:
+            self.client_label_dists.append(label_dist)
+            self.client_socks.append(client_sock)
+            num_connected = len(self.client_socks)
+        
+        # Wait until all clients have connected and reported their distributions
+        if num_connected == self.num_clients:
+            # Compute global class weights
+            global_class_weights = self.compute_global_class_weights()
+            
+            # Send computed weights to all waiting clients
+            with self.lock:
+                for sock in self.client_socks:
+                    send_bytes(sock, pickle.dumps(global_class_weights, protocol=pickle.HIGHEST_PROTOCOL))
+            
+            self.clients_connected.set()
+        else:
+            # Wait for signal that all clients are connected
+            self.clients_connected.wait()
+
         weights_payload = recv_bytes(client_sock)
         trained_weights = pickle.loads(weights_payload)
 
@@ -140,9 +199,6 @@ class NetworkDistributedServer:
         sizes = np.array(self.client_sizes, dtype=np.float64)
         sizes = sizes / sizes.sum()
 
-        # TODO: Due to drift, more machines would likely result in bad performance?
-        # TODO: Cause? Batch Normalization? Epochs (high epochs on smaller dataset)? Normalization?
-        ## Eg at 3 servers, system dowm from 0.98 to 0.94
         avg = [np.zeros_like(w, dtype=w.dtype) for w in self.model_weights[0]]
         for w, alpha in zip(self.model_weights, sizes):
             for i in range(len(w)):
@@ -201,7 +257,7 @@ def main():
     server = NetworkDistributedServer(
         host='0.0.0.0', 
         port=8888, 
-        num_clients=3, 
+        num_clients=2, 
         public_holdout=8000, 
         server_finetune_epochs=2,
         client_epochs=5

@@ -32,7 +32,7 @@ class EpochProgressCallback(Callback):
             progress_msg = {
                 'type': 'progress',
                 'client_id': self.client_id,
-                'epoch': epoch + 1,  # Convert to 1-indexed
+                'epoch': epoch + 1, # Convert to 1-indexed
                 'logs': logs or {}
             }
             # Use a non-blocking send for progress updates
@@ -49,6 +49,7 @@ class NetworkDistributedClient:
         self.server_port = server_port
         self.connection_timeout = connection_timeout
         self.retry_interval = retry_interval
+        self.class_weights = None
 
     def connect(self):
         """Keep attempting to connect to the server until successful"""
@@ -77,6 +78,25 @@ class NetworkDistributedClient:
                 print("\nConnection cancelled by user")
                 sys.exit(0)
 
+    def compute_label_distribution(self):
+        """Compute local label distribution and send to server"""
+        labels = np.argmax(self.y_train, axis=1)
+        total = len(labels)
+        unique, counts = np.unique(labels, return_counts=True)
+        dist = dict(zip(unique.tolist(), counts.tolist()))
+        
+        for c in range(10):
+            if c not in dist:
+                dist[c] = 0
+        
+        print(f"\n=== Client {self.client_id} Local Label Distribution ===")
+        print(f"Total samples: {total}")
+        for c in range(10):
+            print(f"  Class {c}: {dist[c]}")
+        print("=" * 50 + "\n")
+        
+        return dist
+
     def receive_package(self):
         pkg = pickle.loads(recv_bytes(self.sock))
         self.x_train, self.y_train = pkg['x_train'], pkg['y_train']
@@ -84,16 +104,15 @@ class NetworkDistributedClient:
         cfg = pkg['model_config']
         self.epochs = pkg.get('epochs', 5)  # Get epochs from server, default to 5
 
-        labels = np.argmax(self.y_train, axis=1)
-        total = len(labels)
-        unique, counts = np.unique(labels, return_counts=True)
-        dist = dict(zip(unique, counts))
-        num_classes = len(unique)
-        print(f"\n=== Client {self.client_id} Data Summary ===")
-        print(f"Total samples: {total}")
-        for c in range(num_classes):
-            print(f"  {c}: {dist.get(c, 0)}")
-        print("=========================================\n")
+        local_dist = self.compute_label_distribution()
+        
+        # Send label distribution to server
+        send_bytes(self.sock, pickle.dumps(local_dist, protocol=pickle.HIGHEST_PROTOCOL))
+        
+        # Receive class weights from server (blocks until all clients connect)
+        print(f"Client {self.client_id} waiting for global class weights from server...")
+        self.class_weights = pickle.loads(recv_bytes(self.sock))
+        print(f"Client {self.client_id} received class weights: {self.class_weights}\n")
 
         self.model = model_from_json(cfg['model_json'])
         self.model.set_weights(cfg['initial_weights'])
@@ -101,7 +120,6 @@ class NetworkDistributedClient:
         self.model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
 
     def train(self, epochs=5, batch_size=64, validation_split=0.1):
-        # Add progress callback along with other callbacks
         progress_callback = EpochProgressCallback(self.sock, self.client_id)
         callbacks = [
             progress_callback,
@@ -109,10 +127,16 @@ class NetworkDistributedClient:
             tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=1, min_lr=1e-4),
         ]
         t0 = time.time()
+        
+        # Compute sample weights based on class weights
+        y_indices = np.argmax(self.y_train, axis=1)
+        sample_weights = np.array([self.class_weights[int(y)] for y in y_indices])
+        
         hist = self.model.fit(
             self.x_train, self.y_train,
             batch_size=batch_size, epochs=epochs,
             validation_split=validation_split,
+            sample_weight=sample_weights,
             verbose=1, callbacks=callbacks
         )
         dt = time.time() - t0
@@ -146,13 +170,11 @@ class NetworkDistributedClient:
         try:
             self.connect()
             self.receive_package()
-            # Use epochs from server package if not provided
             epochs_to_use = epochs if epochs is not None else getattr(self, 'epochs', 5)
             history = self.train(epochs=epochs_to_use, batch_size=batch_size)
             self.send_weights_and_history(history)
             self.sock.close()
         except KeyboardInterrupt:
-            # User interrupted - send crash notification
             print("\n! Client interrupted by user")
             if hasattr(self, 'sock') and self.sock:
                 self.send_crash_notification()
