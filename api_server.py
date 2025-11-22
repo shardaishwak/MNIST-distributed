@@ -178,7 +178,8 @@ class APIDistributedServer(NetworkDistributedServer):
     
     def handle_client(self, client_sock: socket.socket, client_id: int, data_split, client_address=None):
         """Override to update status and handle progress updates and crashes"""
-        client_uuid = str(uuid.uuid4())[:8] 
+        client_uuid = str(uuid.uuid4())[:8]
+        completed_successfully = False  # Track if client completed before any errors
         
         try:
             self.client_status[client_id]['connected'] = True
@@ -237,30 +238,38 @@ class APIDistributedServer(NetworkDistributedServer):
                 self.client_histories.append((client_id, history_dict))
                 self.client_sizes.append(len(x_split))
             
+            # Mark as completed BEFORE closing socket
+            completed_successfully = True
             self.client_status[client_id]['status'] = 'completed'
             self.client_status[client_id]['epoch'] = self.epochs_per_client
+            print(f"Client {client_id} (UUID={client_uuid}) completed successfully")
+            
             client_sock.close()
             
         except (ConnectionError, ConnectionResetError, BrokenPipeError) as e:
-            print(f"! Client {client_id} (UUID={client_uuid}) disconnected unexpectedly: {e}")
-            self.client_status[client_id]['crashed'] = True
-            self.client_status[client_id]['status'] = 'crashed'
-            self.client_status[client_id]['waiting_replacement'] = True
-            self.client_status[client_id]['connected'] = False
-            with self.lock:
-                self.failed_clients[client_id] = data_split
+            # Only treat as crash if client didn't complete successfully
+            if not completed_successfully:
+                print(f"! Client {client_id} (UUID={client_uuid}) disconnected unexpectedly: {e}")
+                self.client_status[client_id]['crashed'] = True
+                self.client_status[client_id]['status'] = 'crashed'
+                self.client_status[client_id]['waiting_replacement'] = True
+                self.client_status[client_id]['connected'] = False
+                with self.lock:
+                    self.failed_clients[client_id] = data_split
             try:
                 client_sock.close()
             except:
                 pass
         except Exception as e:
-            print(f"! Error handling client {client_id} (UUID={client_uuid}): {e}")
-            self.client_status[client_id]['crashed'] = True
-            self.client_status[client_id]['status'] = 'crashed'
-            self.client_status[client_id]['waiting_replacement'] = True
-            self.client_status[client_id]['connected'] = False
-            with self.lock:
-                self.failed_clients[client_id] = data_split
+            # Only treat as crash if client didn't complete successfully
+            if not completed_successfully:
+                print(f"! Error handling client {client_id} (UUID={client_uuid}): {e}")
+                self.client_status[client_id]['crashed'] = True
+                self.client_status[client_id]['status'] = 'crashed'
+                self.client_status[client_id]['waiting_replacement'] = True
+                self.client_status[client_id]['connected'] = False
+                with self.lock:
+                    self.failed_clients[client_id] = data_split
             try:
                 client_sock.close()
             except:
@@ -291,6 +300,9 @@ class APIDistributedServer(NetworkDistributedServer):
                     t.start()
                     threads[cid] = t
                 
+                # Set accept timeout to avoid blocking forever
+                srv.settimeout(1.0)
+                
                 while True:
                     for client_id in list(threads.keys()):
                         threads[client_id].join(timeout=0.1)
@@ -303,20 +315,24 @@ class APIDistributedServer(NetworkDistributedServer):
                     if failed_client_ids:
                         for failed_id in failed_client_ids:
                             print(f"Waiting for replacement client for slot {failed_id}...")
-                            client_sock, client_address = srv.accept()
-                            addr_str = f"{client_address[0]}:{client_address[1]}" if client_address else "unknown"
-                            print(f"Replacement client connected for slot {failed_id}")
-                            
-                            with self.lock:
-                                data_split = self.failed_clients.pop(failed_id)
-                            
-                            self.client_status[failed_id]['crashed'] = False
-                            self.client_status[failed_id]['waiting_replacement'] = False
-                            self.client_status[failed_id]['epoch'] = 0
-                            
-                            t = threading.Thread(target=self.handle_client, args=(client_sock, failed_id, data_split, addr_str), daemon=True)
-                            t.start()
-                            threads[failed_id] = t
+                            try:
+                                client_sock, client_address = srv.accept()
+                                addr_str = f"{client_address[0]}:{client_address[1]}" if client_address else "unknown"
+                                print(f"Replacement client connected for slot {failed_id}")
+                                
+                                with self.lock:
+                                    data_split = self.failed_clients.pop(failed_id)
+                                
+                                self.client_status[failed_id]['crashed'] = False
+                                self.client_status[failed_id]['waiting_replacement'] = False
+                                self.client_status[failed_id]['epoch'] = 0
+                                
+                                t = threading.Thread(target=self.handle_client, args=(client_sock, failed_id, data_split, addr_str), daemon=True)
+                                t.start()
+                                threads[failed_id] = t
+                            except socket.timeout:
+                                # Timeout waiting for replacement, check again
+                                pass
                     
                     if len(self.model_weights) == self.num_clients and len(threads) == 0:
                         break
@@ -324,6 +340,10 @@ class APIDistributedServer(NetworkDistributedServer):
                     time.sleep(0.5)
                 
                 print(f"All {self.num_clients} clients completed successfully")
+                
+                # Close server socket to prevent new connections
+                srv.close()
+                print("Training server socket closed")
 
                 aggregated = self.federated_averaging()
                 self.evaluate_and_visualize_to_session(aggregated, session_id)

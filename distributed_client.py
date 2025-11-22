@@ -159,7 +159,6 @@ class NetworkDistributedClient:
                 self.sock.close()
             raise
         except Exception as e:
-            # Unexpected error - send crash notification
             print(f"\n! Client crashed with error: {e}")
             if hasattr(self, 'sock') and self.sock:
                 self.send_crash_notification()
@@ -181,14 +180,14 @@ class NetworkDistributedClient:
                 print(f"SESSION {session_count}: Waiting for server...")
                 print(f"{'='*60}\n")
                 
-                # Run a single training session
                 self.run_single_session(epochs=epochs, batch_size=batch_size)
                 
                 print(f"\n{'='*60}")
                 print(f"SESSION {session_count} COMPLETED")
                 print(f"{'='*60}")
-                print(f"Waiting {self.retry_interval} seconds before listening for next session...\n")
-                time.sleep(self.retry_interval)
+                wait_time = max(self.retry_interval, 10) 
+                print(f"Waiting {wait_time} seconds before listening for next session...\n")
+                time.sleep(wait_time)
                 
             except KeyboardInterrupt:
                 print(f"\n\n{'='*60}")
