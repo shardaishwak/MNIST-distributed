@@ -1,7 +1,6 @@
 import ray
-import numpy as np
 import os
-from preprocess import preprocess_batch
+from segment import get_characters
 
 
 def main():
@@ -16,8 +15,9 @@ def main():
     ]
 
     batch_size = 30
+ 
+    batch = get_characters(image_lst[:15])
 
-    batch = preprocess_batch(image_lst[:50])
 
     #ray.init()
 
