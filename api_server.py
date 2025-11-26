@@ -138,6 +138,7 @@ class APIDistributedServer(NetworkDistributedServer):
         self.clients_connected = threading.Event()
         self.data_splits = []
         self.failed_clients = {}
+        self.global_class_weights = None  # Store computed weights for replacement clients
     
     def load_dataset_data(self):
         """Load dataset from datasets folder"""
@@ -265,9 +266,10 @@ class APIDistributedServer(NetworkDistributedServer):
             
             print(f"Client {client_id} waiting for all clients to connect...")
             
-            # BALANCING: Receive label distribution from client
             if self.use_balancing:
                 label_dist = pickle.loads(recv_bytes(client_sock))
+                
+                is_replacement = self.clients_connected.is_set()
                 
                 with self.lock:
                     self.client_label_dists.append(label_dist)
@@ -276,39 +278,50 @@ class APIDistributedServer(NetworkDistributedServer):
                 
                 print(f"Client {client_id} reported label distribution. Connected: {num_connected}/{self.num_clients}")
                 
-                # Wait until all clients have connected and reported their distributions
-                if num_connected == self.num_clients:
+                if is_replacement:
+                    print(f"Client {client_id} is a replacement. Sending stored class weights...")
+                    if self.global_class_weights is not None:
+                        send_bytes(client_sock, pickle.dumps(self.global_class_weights, protocol=pickle.HIGHEST_PROTOCOL))
+                        print(f"Client {client_id} received class weights. Starting training...")
+                    else:
+                        dummy_weights = {c: 1.0 for c in range(self.num_classes)}
+                        send_bytes(client_sock, pickle.dumps(dummy_weights, protocol=pickle.HIGHEST_PROTOCOL))
+                        print(f"Warning: No stored weights, sent dummy weights to client {client_id}")
+                elif num_connected == self.num_clients:
                     print(f"All clients connected! Computing global class weights...")
-                    # Compute global class weights
-                    global_class_weights = self.compute_global_class_weights()
+                    self.global_class_weights = self.compute_global_class_weights()
                     
-                    # Send computed weights to all waiting clients
                     with self.lock:
                         for sock in self.client_socks:
-                            send_bytes(sock, pickle.dumps(global_class_weights, protocol=pickle.HIGHEST_PROTOCOL))
+                            send_bytes(sock, pickle.dumps(self.global_class_weights, protocol=pickle.HIGHEST_PROTOCOL))
                     
                     print(f"Global weights sent to all clients. Starting training...")
                     self.clients_connected.set()
                 else:
-                    # Wait for signal that all clients are connected
                     print(f"Client {client_id} waiting for other clients...")
                     self.clients_connected.wait()
                     print(f"Client {client_id} received signal to proceed")
             else:
-                # No balancing, but still wait for all clients to connect
-                # I will change this part before we submit, coudlnt get it to work otherwise.
+                is_replacement = self.clients_connected.is_set()
+                
                 with self.lock:
                     self.client_socks.append(client_sock)
                     num_connected = len(self.client_socks)
                 
                 print(f"Client {client_id} connected. Waiting for all clients: {num_connected}/{self.num_clients}")
                 
-                if num_connected == self.num_clients:
+                if is_replacement:
+                    # This is a replacement client - send weights directly
+                    print(f"Client {client_id} is a replacement. Sending stored weights...")
+                    weights_to_send = self.global_class_weights if self.global_class_weights else {c: 1.0 for c in range(self.num_classes)}
+                    send_bytes(client_sock, pickle.dumps(weights_to_send, protocol=pickle.HIGHEST_PROTOCOL))
+                    print(f"Client {client_id} received weights. Starting training...")
+                elif num_connected == self.num_clients:
                     # Send dummy weights (all 1.0) to all clients
-                    dummy_weights = {c: 1.0 for c in range(self.num_classes)}
+                    self.global_class_weights = {c: 1.0 for c in range(self.num_classes)}
                     with self.lock:
                         for sock in self.client_socks:
-                            send_bytes(sock, pickle.dumps(dummy_weights, protocol=pickle.HIGHEST_PROTOCOL))
+                            send_bytes(sock, pickle.dumps(self.global_class_weights, protocol=pickle.HIGHEST_PROTOCOL))
                     
                     print(f"All clients connected. Sent dummy weights. Starting training...")
                     self.clients_connected.set()
