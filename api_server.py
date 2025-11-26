@@ -422,7 +422,9 @@ class APIDistributedServer(NetworkDistributedServer):
                     t.start()
                     threads[cid] = t
                 
-                srv.settimeout(1.0)
+                srv.close()
+                srv = None
+                print(f"Accepted {self.num_clients} clients. Server socket closed to prevent extra connections.")
                 
                 while True:
                     for client_id in list(threads.keys()):
@@ -433,7 +435,15 @@ class APIDistributedServer(NetworkDistributedServer):
                     with self.lock:
                         failed_client_ids = list(self.failed_clients.keys())
                     
-                    if failed_client_ids:
+                    if failed_client_ids and srv is None:
+                        print(f"Reopening server socket for {len(failed_client_ids)} replacement client(s)...")
+                        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        srv.bind((self.host, self.port))
+                        srv.listen(len(failed_client_ids))
+                        srv.settimeout(1.0)
+                    
+                    if failed_client_ids and srv is not None:
                         for failed_id in failed_client_ids:
                             print(f"Waiting for replacement client for slot {failed_id}...")
                             try:
@@ -453,6 +463,13 @@ class APIDistributedServer(NetworkDistributedServer):
                                 threads[failed_id] = t
                             except socket.timeout:
                                 pass
+                        
+                        # If no more failed clients, close the replacement socket
+                        with self.lock:
+                            if len(self.failed_clients) == 0 and srv is not None:
+                                srv.close()
+                                srv = None
+                                print("All replacements handled. Server socket closed again.")
                     
                     if len(self.model_weights) == self.num_clients and len(threads) == 0:
                         break
@@ -461,8 +478,9 @@ class APIDistributedServer(NetworkDistributedServer):
                 
                 print(f"All {self.num_clients} clients completed successfully")
                 
-                srv.close()
-                print("Training server socket closed")
+                if srv is not None:
+                    srv.close()
+                    print("Training server socket closed")
 
                 aggregated = self.federated_averaging()
                 self.evaluate_and_visualize_to_session(aggregated, session_id)
