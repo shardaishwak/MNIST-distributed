@@ -137,6 +137,7 @@ class APIDistributedServer:
         self.clients_connected = threading.Event()
         self.data_splits = []
         self.failed_clients = {}
+        self.global_class_weights = None  # Store computed weights for replacement clients
     
     def load_dataset_data(self):
         """Load dataset from datasets folder"""
@@ -265,9 +266,10 @@ class APIDistributedServer:
             # SYNCHRONIZATION: Always wait for all clients to connect before proceeding
             print(f"Client {client_id} waiting for all clients to connect...")
             
-            # BALANCING: Receive label distribution from client
             if self.use_balancing:
                 label_dist = pickle.loads(recv_bytes(client_sock))
+                
+                is_replacement = self.clients_connected.is_set()
                 
                 with self.lock:
                     self.client_label_dists.append(label_dist)
@@ -276,38 +278,50 @@ class APIDistributedServer:
                 
                 print(f"Client {client_id} reported label distribution. Connected: {num_connected}/{self.num_clients}")
                 
-                # Wait until all clients have connected and reported their distributions
-                if num_connected == self.num_clients:
+                if is_replacement:
+                    print(f"Client {client_id} is a replacement. Sending stored class weights...")
+                    if self.global_class_weights is not None:
+                        send_bytes(client_sock, pickle.dumps(self.global_class_weights, protocol=pickle.HIGHEST_PROTOCOL))
+                        print(f"Client {client_id} received class weights. Starting training...")
+                    else:
+                        dummy_weights = {c: 1.0 for c in range(self.num_classes)}
+                        send_bytes(client_sock, pickle.dumps(dummy_weights, protocol=pickle.HIGHEST_PROTOCOL))
+                        print(f"Warning: No stored weights, sent dummy weights to client {client_id}")
+                elif num_connected == self.num_clients:
                     print(f"All clients connected! Computing global class weights...")
-                    # Compute global class weights
-                    global_class_weights = self.compute_global_class_weights()
+                    self.global_class_weights = self.compute_global_class_weights()
                     
-                    # Send computed weights to all waiting clients
                     with self.lock:
                         for sock in self.client_socks:
-                            send_bytes(sock, pickle.dumps(global_class_weights, protocol=pickle.HIGHEST_PROTOCOL))
+                            send_bytes(sock, pickle.dumps(self.global_class_weights, protocol=pickle.HIGHEST_PROTOCOL))
                     
                     print(f"Global weights sent to all clients. Starting training...")
                     self.clients_connected.set()
                 else:
-                    # Wait for signal that all clients are connected
                     print(f"Client {client_id} waiting for other clients...")
                     self.clients_connected.wait()
                     print(f"Client {client_id} received signal to proceed")
             else:
-                # No balancing, but still wait for all clients to connect
+                is_replacement = self.clients_connected.is_set()
+                
                 with self.lock:
                     self.client_socks.append(client_sock)
                     num_connected = len(self.client_socks)
                 
                 print(f"Client {client_id} connected. Waiting for all clients: {num_connected}/{self.num_clients}")
                 
-                if num_connected == self.num_clients:
+                if is_replacement:
+                    # This is a replacement client - send weights directly
+                    print(f"Client {client_id} is a replacement. Sending stored weights...")
+                    weights_to_send = self.global_class_weights if self.global_class_weights else {c: 1.0 for c in range(self.num_classes)}
+                    send_bytes(client_sock, pickle.dumps(weights_to_send, protocol=pickle.HIGHEST_PROTOCOL))
+                    print(f"Client {client_id} received weights. Starting training...")
+                elif num_connected == self.num_clients:
                     # Send dummy weights (all 1.0) to all clients
-                    dummy_weights = {c: 1.0 for c in range(self.num_classes)}
+                    self.global_class_weights = {c: 1.0 for c in range(self.num_classes)}
                     with self.lock:
                         for sock in self.client_socks:
-                            send_bytes(sock, pickle.dumps(dummy_weights, protocol=pickle.HIGHEST_PROTOCOL))
+                            send_bytes(sock, pickle.dumps(self.global_class_weights, protocol=pickle.HIGHEST_PROTOCOL))
                     
                     print(f"All clients connected. Sent dummy weights. Starting training...")
                     self.clients_connected.set()
@@ -541,7 +555,9 @@ class APIDistributedServer:
                     t.start()
                     threads[cid] = t
                 
-                srv.settimeout(1.0)
+                srv.close()
+                srv = None
+                print(f"Accepted {self.num_clients} clients. Server socket closed to prevent extra connections.")
                 
                 while True:
                     for client_id in list(threads.keys()):
@@ -552,7 +568,15 @@ class APIDistributedServer:
                     with self.lock:
                         failed_client_ids = list(self.failed_clients.keys())
                     
-                    if failed_client_ids:
+                    if failed_client_ids and srv is None:
+                        print(f"Reopening server socket for {len(failed_client_ids)} replacement client(s)...")
+                        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        srv.bind((self.host, self.port))
+                        srv.listen(len(failed_client_ids))
+                        srv.settimeout(1.0)
+                    
+                    if failed_client_ids and srv is not None:
                         for failed_id in failed_client_ids:
                             print(f"Waiting for replacement client for slot {failed_id}...")
                             try:
@@ -572,6 +596,13 @@ class APIDistributedServer:
                                 threads[failed_id] = t
                             except socket.timeout:
                                 pass
+                        
+                        # If no more failed clients, close the replacement socket
+                        with self.lock:
+                            if len(self.failed_clients) == 0 and srv is not None:
+                                srv.close()
+                                srv = None
+                                print("All replacements handled. Server socket closed again.")
                     
                     if len(self.model_weights) == self.num_clients and len(threads) == 0:
                         break
@@ -580,8 +611,9 @@ class APIDistributedServer:
                 
                 print(f"All {self.num_clients} clients completed successfully")
                 
-                srv.close()
-                print("Training server socket closed")
+                if srv is not None:
+                    srv.close()
+                    print("Training server socket closed")
 
                 # Use FedTVD aggregation instead of FedAvg
                 aggregated = self.fedtvd_aggregation(threshold=0.5, use_median=False)
@@ -962,6 +994,165 @@ def get_metrics(session_id):
         else:
             return jsonify({'error': 'Metrics not found'}), 404
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# Handwriting recognition preprocessing functions (from playground.py)
+def _center_of_mass(img_arr):
+    """Calculate center of mass of image"""
+    y_idx, x_idx = np.indices(img_arr.shape)
+    m = img_arr.sum() + 1e-8
+    cy = (y_idx * img_arr).sum() / m
+    cx = (x_idx * img_arr).sum() / m
+    return cy, cx
+
+def _shift_to_center(img_arr, target=(14, 14)):
+    """Shift image to center based on center of mass"""
+    cy, cx = _center_of_mass(img_arr)
+    dy = int(round(target[0] - cy))
+    dx = int(round(target[1] - cx))
+    shifted = np.roll(img_arr, shift=dy, axis=0)
+    shifted = np.roll(shifted, shift=dx, axis=1)
+    return shifted
+
+def _deskew_28(img_arr):
+    """Simple deskew by second-order moments"""
+    import math
+    y, x = np.indices(img_arr.shape)
+    img = img_arr.copy()
+    img /= (img.max() + 1e-8)
+
+    m00 = img.sum() + 1e-8
+    m10 = (x * img).sum()
+    m01 = (y * img).sum()
+    x_cent = m10 / m00
+    y_cent = m01 / m00
+
+    x = x - x_cent
+    y = y - y_cent
+
+    mu11 = (x * y * img).sum() / m00
+    mu20 = ((x ** 2) * img).sum() / m00
+    mu02 = ((y ** 2) * img).sum() / m00
+    
+    denom = (mu20 - mu02)
+    if abs(denom) < 1e-8:
+        return img_arr
+
+    tan2theta = 2 * mu11 / denom
+    theta = 0.5 * math.atan(tan2theta)
+    t = math.tan(theta)
+    h, w = img_arr.shape
+    yy, xx = np.indices((h, w)).astype(np.float32)
+    yy -= h / 2.0
+    xx -= w / 2.0
+    yy_prime = yy - t * xx
+    yy_prime += h / 2.0
+    xx += w / 2.0
+
+    def bilinear(img, yyf, xxf):
+        h, w = img.shape
+        y0 = np.clip(np.floor(yyf).astype(int), 0, h - 1)
+        x0 = np.clip(np.floor(xxf).astype(int), 0, w - 1)
+        y1 = np.clip(y0 + 1, 0, h - 1)
+        x1 = np.clip(x0 + 1, 0, w - 1)
+
+        wy = yyf - y0
+        wx = xxf - x0
+
+        top = (1 - wx) * img[y0, x0] + wx * img[y0, x1]
+        bot = (1 - wx) * img[y1, x0] + wx * img[y1, x1]
+        return (1 - wy) * top + wy * bot
+
+    deskewed = bilinear(img_arr, yy_prime, xx)
+    return deskewed
+
+def preprocess_digit_image(pil_img):
+    """Preprocess digit image for MNIST model (from playground.py)"""
+    from PIL import Image, ImageOps, ImageFilter
+    
+    # Convert to grayscale and invert
+    img = pil_img.convert("L")
+    img = ImageOps.invert(img)
+
+    # Apply filters
+    img = img.filter(ImageFilter.GaussianBlur(radius=0.5))
+    img = img.filter(ImageFilter.MaxFilter(size=3))
+
+    # Binarize
+    arr = np.array(img, dtype=np.uint8)
+    th = 128
+    bin_mask = (arr >= th)
+
+    if not bin_mask.any():
+        x28 = np.zeros((28, 28, 1), dtype=np.float32)
+        return x28[np.newaxis, ...]
+
+    # Crop to bounding box
+    ys, xs = np.where(bin_mask)
+    minx, maxx = xs.min(), xs.max()
+    miny, maxy = ys.min(), ys.max()
+    img = img.crop((minx, miny, maxx + 1, maxy + 1))
+    
+    # Resize to fit in 20x20 box, centered in 28x28
+    w, h = img.size
+    scale = 20 / max(w, h)
+    new_w, new_h = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    canvas = Image.new("L", (28, 28), color=0)
+    left = (28 - new_w) // 2
+    top = (28 - new_h) // 2
+    canvas.paste(img, (left, top))
+
+    # Normalize and apply transformations
+    x = np.array(canvas).astype("float32") / 255.0
+    x = _shift_to_center(x)
+    x = _deskew_28(x)  # Apply deskewing
+
+    x = x.reshape(1, 28, 28, 1).astype(np.float32)
+    return x
+
+@app.route('/api/predict/digit', methods=['POST'])
+def predict_digit():
+    """Predict a digit from a canvas drawing"""
+    try:
+        from flask import request
+        from PIL import Image
+        import io
+        
+        # Get the image and session_id from the request
+        if 'image' not in request.files:
+            return jsonify({'error': 'No image provided'}), 400
+        
+        session_id = request.form.get('session_id')
+        if not session_id:
+            return jsonify({'error': 'No session_id provided'}), 400
+        
+        # Load the model for this session
+        model_path = os.path.join(OUTPUTS_DIR, session_id, 'model.keras')
+        if not os.path.exists(model_path):
+            return jsonify({'error': 'Model not found for this session'}), 404
+        
+        model = tf.keras.models.load_model(model_path)
+        
+        # Load and preprocess the image
+        image_file = request.files['image']
+        pil_image = Image.open(io.BytesIO(image_file.read()))
+        
+        # Preprocess the image
+        preprocessed = preprocess_digit_image(pil_image)
+        
+        # Make prediction
+        predictions = model.predict(preprocessed, verbose=0)[0]
+        predicted_digit = int(np.argmax(predictions))
+        
+        return jsonify({
+            'prediction': predicted_digit,
+            'probabilities': predictions.tolist(),
+        })
+    except Exception as e:
+        import traceback
+        print(f"Error in predict_digit: {e}")
+        print(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':

@@ -57,6 +57,7 @@ function ResultsNode({ data }: NodeProps<ResultsNodeData>) {
   return (
     <div className="px-6 py-4 shadow-xl rounded-lg border-2 border-green-400 bg-white min-w-[500px] max-w-[600px]">
       <Handle type="target" position={Position.Left} />
+      <Handle type="source" position={Position.Right} />
       
       <div className="space-y-4">
         <div className="flex items-center gap-2 mb-3">

@@ -246,6 +246,9 @@ class NetworkDistributedServer:
             t.start()
             threads.append(t)
 
+        srv.close()
+        print(f"Accepted {self.num_clients} clients. Server socket closed to prevent extra connections.")
+
         for t in threads: t.join()
         if len(self.model_weights) != self.num_clients:
             raise RuntimeError(f"Expected {self.num_clients} models, got {len(self.model_weights)}")

@@ -18,6 +18,7 @@ import TrainingParamsNode from '@/components/TrainingParamsNode';
 import RunNode from '@/components/RunNode';
 import ClientNode from '@/components/ClientNode';
 import ResultsNode from '@/components/ResultsNode';
+import HandwritingNode from '@/components/HandwritingNode';
 
 const API_BASE_URL = 'http://localhost:5001/api';
 
@@ -28,6 +29,7 @@ const nodeTypes = {
   run: RunNode,
   client: ClientNode,
   results: ResultsNode,
+  handwriting: HandwritingNode,
 };
 
 export default function Home() {
@@ -41,6 +43,61 @@ export default function Home() {
   const [serverStatus, setServerStatus] = useState<string>('idle'); // idle, running, completed, error
   const [apiConnected, setApiConnected] = useState<boolean>(false); // API server connectivity
 
+  // Initial flow nodes with better spacing
+  const initialNodes: Node[] = useMemo(() => [
+    {
+      id: 'dataset',
+      type: 'dataset',
+      position: { x: 50, y: 200 },
+      data: {
+        selectedDataset,
+        onDatasetChange: setSelectedDataset,
+        apiBaseUrl: API_BASE_URL,
+      },
+    },
+    {
+      id: 'modelConfig',
+      type: 'modelConfig',
+      position: { x: 400, y: 93 },
+      data: {
+        modelConfig,
+        onModelConfigChange: setModelConfig,
+        apiBaseUrl: API_BASE_URL,
+      },
+    },
+    {
+      id: 'trainingParams',
+      type: 'trainingParams',
+      position: { x: 850, y: 144 },
+      data: {
+        numClients,
+        epochsPerClient,
+        onNumClientsChange: setNumClients,
+        onEpochsPerClientChange: setEpochsPerClient,
+      },
+    },
+    {
+      id: 'run',
+      type: 'run',
+      position: { x: 1200, y: 180  },
+      data: {
+        onRun: () => {}, // Placeholder, will be updated in useEffect
+        isTraining,
+        canRun: selectedDataset !== '' && modelConfig !== '',
+      },
+    },
+  ], [selectedDataset, modelConfig, numClients, epochsPerClient, isTraining]);
+
+  const initialEdges: Edge[] = useMemo(() => [
+    { id: 'e1', source: 'dataset', target: 'modelConfig', type: 'smoothstep', animated: false },
+    { id: 'e2', source: 'modelConfig', target: 'trainingParams', type: 'smoothstep', animated: false },
+    { id: 'e3', source: 'trainingParams', target: 'run', type: 'smoothstep', animated: false },
+  ], []);
+
+  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+
+  // Training start handler
   const handleStartTraining = useCallback(async () => {
     if (!selectedDataset || !modelConfig) {
       alert('Please select a dataset and provide model configuration');
@@ -48,6 +105,24 @@ export default function Home() {
     }
 
     try {
+      // Clear previous training nodes (clients, results, handwriting)
+      setNodes((nds) => nds.filter((n) => 
+        !n.id.startsWith('client-') && 
+        n.id !== 'results' && 
+        n.id !== 'handwriting'
+      ));
+      
+      // Clear edges related to clients, results, and handwriting
+      setEdges((eds) => eds.filter((e) => 
+        !e.source.startsWith('client-') && 
+        !e.target.startsWith('client-') &&
+        e.source !== 'results' &&
+        e.target !== 'results' &&
+        e.source !== 'handwriting' &&
+        e.target !== 'handwriting' &&
+        e.id !== 'results-handwriting'
+      ));
+      
       setIsTraining(true);
       setClientNodesCreated(false);
       setServerStatus('running');
@@ -70,67 +145,19 @@ export default function Home() {
       setIsTraining(false);
       setServerStatus('error');
     }
-  }, [selectedDataset, modelConfig, numClients, epochsPerClient]);
+  }, [selectedDataset, modelConfig, numClients, epochsPerClient, setNodes, setEdges]);
 
-  // Initial flow nodes
-  const initialNodes: Node[] = useMemo(() => [
-    {
-      id: 'dataset',
-      type: 'dataset',
-      position: { x: 100, y: 200 },
-      data: {
-        selectedDataset,
-        onDatasetChange: setSelectedDataset,
-        apiBaseUrl: API_BASE_URL,
-      },
-    },
-    {
-      id: 'modelConfig',
-      type: 'modelConfig',
-      position: { x: 450, y: 200 },
-      data: {
-        modelConfig,
-        onModelConfigChange: setModelConfig,
-        apiBaseUrl: API_BASE_URL,
-      },
-    },
-    {
-      id: 'trainingParams',
-      type: 'trainingParams',
-      position: { x: 800, y: 200 },
-      data: {
-        numClients,
-        epochsPerClient,
-        onNumClientsChange: setNumClients,
-        onEpochsPerClientChange: setEpochsPerClient,
-      },
-    },
-    {
-      id: 'run',
-      type: 'run',
-      position: { x: 1150, y: 200 },
-      data: {
-        onRun: handleStartTraining,
-        isTraining,
-        canRun: selectedDataset !== '' && modelConfig !== '',
-      },
-    },
-  ], [selectedDataset, modelConfig, numClients, epochsPerClient, isTraining, handleStartTraining]);
-
-  const initialEdges: Edge[] = useMemo(() => [
-    { id: 'e1', source: 'dataset', target: 'modelConfig', type: 'smoothstep', animated: false },
-    { id: 'e2', source: 'modelConfig', target: 'trainingParams', type: 'smoothstep', animated: false },
-    { id: 'e3', source: 'trainingParams', target: 'run', type: 'smoothstep', animated: false },
-  ], []);
-
-  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
-
-  // Update nodes when data changes (preserve client nodes)
+  // Update nodes when data changes (preserve client, results, and handwriting nodes)
   useEffect(() => {
     setNodes((nds) => {
       const clientNodes = nds.filter((node) => node.id.startsWith('client-'));
-      const mainNodes = nds.filter((node) => !node.id.startsWith('client-'));
+      const resultsNode = nds.find((node) => node.id === 'results');
+      const handwritingNode = nds.find((node) => node.id === 'handwriting');
+      const mainNodes = nds.filter((node) => 
+        !node.id.startsWith('client-') && 
+        node.id !== 'results' && 
+        node.id !== 'handwriting'
+      );
       
       const updatedMainNodes = mainNodes.map((node) => {
         if (node.id === 'dataset') {
@@ -165,7 +192,12 @@ export default function Home() {
         return node;
       });
       
-      return [...updatedMainNodes, ...clientNodes];
+      // Combine all nodes: main nodes, client nodes, and results/handwriting if they exist
+      const allNodes = [...updatedMainNodes, ...clientNodes];
+      if (resultsNode) allNodes.push(resultsNode);
+      if (handwritingNode) allNodes.push(handwritingNode);
+      
+      return allNodes;
     });
   }, [selectedDataset, modelConfig, numClients, epochsPerClient, isTraining, handleStartTraining, setNodes]);
 
@@ -229,13 +261,14 @@ export default function Home() {
           if (!clientNodesCreated) {
             const newClientNodes: Node[] = clientIds.map((clientId, index) => {
               const clientData = response.data.clients[clientId];
-              const x = 1150 + ((index % 3) * 350);
-              const y = 400 + Math.floor(index / 3) * 250;
+              // Position clients vertically to the right of Run node
+              const x = 1500; // To the right of Run node
+              const y = (index * 280); // Vertical stack with 220px spacing
               
               return {
                 id: `client-${clientId}`,
                 type: 'client',
-                position: { x, y },
+                position: { x, y: y - 100},
                 data: {
                   clientId,
                   status: clientData.status,
@@ -293,36 +326,99 @@ export default function Home() {
         
         if (response.data.status === 'completed') {
           setIsTraining(false);
-          // Replace client nodes with results node
+          // Keep client nodes, add results and handwriting nodes
           if (response.data.session_id) {
+            // Calculate middle Y position based on number of clients
+            const clientNodes = response.data.clients ? Object.keys(response.data.clients) : [];
+            const numClients = clientNodes.length;
+            const middleY = ((numClients - 1) * 280) / 2; // Middle of vertical client stack
+
             const resultsNode: Node = {
               id: 'results',
               type: 'results',
-              position: { x: 1150, y: 400 },
+              position: { x: 1800, y: middleY - 400 }, // To the right of clients, adjust for node height
               data: {
                 sessionId: response.data.session_id,
                 apiBaseUrl: API_BASE_URL,
               },
             };
 
-            // Remove client nodes and add results node
-            setNodes((nds) => [
-              ...nds.filter((n) => !n.id.startsWith('client-')),
-              resultsNode,
-            ]);
-
-            // Update edges to connect run to results
-            setEdges((eds) => [
-              ...eds.filter((e) => !e.source.startsWith('run') || !e.target.startsWith('client-')),
-              {
-                id: 'run-results',
-                source: 'run',
-                target: 'results',
-                type: 'smoothstep',
-                animated: false,
-                style: { stroke: '#10b981', strokeWidth: 3 },
+            const handwritingNode: Node = {
+              id: 'handwriting',
+              type: 'handwriting',
+              position: { x: 2500, y: middleY - 300 }, // To the right of results
+              data: {
+                sessionId: response.data.session_id,
+                apiBaseUrl: API_BASE_URL,
               },
-            ]);
+            };
+
+            // Keep client nodes but mark them as completed, add results + handwriting nodes
+            setNodes((nds) => {
+              const updatedNodes = nds.map((node) => {
+                if (node.id.startsWith('client-')) {
+                  const clientId = parseInt(node.id.split('-')[1]);
+                  const clientData = response.data.clients[clientId];
+                  return {
+                    ...node,
+                    data: {
+                      ...node.data,
+                      status: 'completed',
+                      epoch: clientData?.total_epochs || node.data.totalEpochs,
+                      totalEpochs: clientData?.total_epochs || node.data.totalEpochs,
+                    },
+                  };
+                }
+                return node;
+              });
+              
+              // Check if results and handwriting nodes already exist
+              const hasResults = updatedNodes.some((n) => n.id === 'results');
+              const hasHandwriting = updatedNodes.some((n) => n.id === 'handwriting');
+              
+              if (!hasResults) {
+                updatedNodes.push(resultsNode);
+              }
+              if (!hasHandwriting) {
+                updatedNodes.push(handwritingNode);
+              }
+              
+              return updatedNodes;
+            });
+
+            // Update edges: keep client edges, add edges from all clients to results, and results to handwriting
+            setEdges((eds) => {
+              const newEdges = [...eds];
+              
+              // Add edges from each client to results (if not already exists)
+              clientNodes.forEach((clientId) => {
+                const edgeId = `client-${clientId}-results`;
+                if (!newEdges.some((e) => e.id === edgeId)) {
+                  newEdges.push({
+                    id: edgeId,
+                    source: `client-${clientId}`,
+                    target: 'results',
+                    type: 'smoothstep',
+                    animated: false,
+                    style: { stroke: '#10b981', strokeWidth: 2 },
+                  });
+                }
+              });
+              
+              // Add edge from results to handwriting (if not already exists)
+              if (!newEdges.some((e) => e.id === 'results-handwriting')) {
+                newEdges.push({
+                  id: 'results-handwriting',
+                  source: 'results',
+                  target: 'handwriting',
+                  type: 'smoothstep',
+                  animated: false,
+                  style: { stroke: '#9333ea', strokeWidth: 2 },
+                });
+              }
+              
+              return newEdges;
+            });
           }
         } else if (response.data.status === 'error') {
           setIsTraining(false);
