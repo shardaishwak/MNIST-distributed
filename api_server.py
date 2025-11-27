@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Flask API server for federated learning management
+Flask API server for federated learning management with distributed balancing
 """
 import os
 import json
@@ -21,7 +21,7 @@ from tensorflow.keras.utils import to_categorical
 import matplotlib
 matplotlib.use('Agg')
 
-from distributed_server import NetworkDistributedServer, send_bytes, recv_bytes
+from distributed_server import send_bytes, recv_bytes
 
 app = Flask(__name__)
 CORS(app)
@@ -102,8 +102,8 @@ def compile_model_from_config(model_config: dict, input_shape: tuple, num_classe
     model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
     return model
 
-class APIDistributedServer(NetworkDistributedServer):
-    """Extended server class that works with API"""
+class APIDistributedServer:
+    """Extended server class that works with API and supports distributed balancing"""
     
     def __init__(self, dataset_name: str, model_config: dict, num_clients: int, 
                  epochs_per_client: int, host='0.0.0.0', port=8888, 
@@ -123,7 +123,6 @@ class APIDistributedServer(NetworkDistributedServer):
             'crashed': False,
             'waiting_replacement': False 
         } for i in range(num_clients)}
-        # Initialize parent without loading data (we'll do it ourselves)
         self.host = host
         self.port = port
         self.num_clients = num_clients
@@ -236,7 +235,7 @@ class APIDistributedServer(NetworkDistributedServer):
         return class_weights
     
     def handle_client(self, client_sock: socket.socket, client_id: int, data_split, client_address=None):
-        """Override to update status and handle progress updates and crashes"""
+        """Handle client connection with balancing support"""
         client_uuid = str(uuid.uuid4())[:8]
         completed_successfully = False
         
@@ -263,6 +262,7 @@ class APIDistributedServer(NetworkDistributedServer):
             
             send_bytes(client_sock, pickle.dumps(package, protocol=pickle.HIGHEST_PROTOCOL))
             
+            # SYNCHRONIZATION: Always wait for all clients to connect before proceeding
             print(f"Client {client_id} waiting for all clients to connect...")
             
             # BALANCING: Receive label distribution from client
@@ -296,7 +296,6 @@ class APIDistributedServer(NetworkDistributedServer):
                     print(f"Client {client_id} received signal to proceed")
             else:
                 # No balancing, but still wait for all clients to connect
-                # I will change this part before we submit, coudlnt get it to work otherwise.
                 with self.lock:
                     self.client_socks.append(client_sock)
                     num_connected = len(self.client_socks)
@@ -397,6 +396,126 @@ class APIDistributedServer(NetworkDistributedServer):
                 avg[i] += alpha * w[i]
         return avg
     
+    def fedtvd_aggregation(self, threshold=0.5, use_median=False):
+        """
+        FedTVD aggregation - detects and handles client drift using Total Variation Distance
+        
+        Args:
+            threshold: TVD threshold for identifying drift (0.0-1.0)
+            use_median: Use median instead of mean for aggregation of non-drifted clients
+        
+        Returns:
+            Aggregated weights with drift mitigation
+        """
+        print("\n=== FedTVD Aggregation ===")
+        print(f"TVD Threshold: {threshold}")
+        print(f"Number of clients: {len(self.model_weights)}\n")
+        
+        num_layers = len(self.model_weights[0])
+        num_clients = len(self.model_weights)
+        sizes = np.array(self.client_sizes, dtype=np.float64)
+        sizes = sizes / sizes.sum()
+        
+        # Step 1: Compute TVD between each client's weights and global average
+        print("Step 1: Computing baseline average...")
+        baseline_avg = [np.zeros_like(w, dtype=w.dtype) for w in self.model_weights[0]]
+        for w, alpha in zip(self.model_weights, sizes):
+            for i in range(len(w)):
+                baseline_avg[i] += alpha * w[i]
+        
+        # Step 2: Calculate TVD for each client
+        print("Step 2: Computing Total Variation Distance for each client...\n")
+        tvd_scores = []
+        
+        for client_id, client_weights in enumerate(self.model_weights):
+            tvd = self._compute_total_variation_distance(client_weights, baseline_avg)
+            tvd_scores.append(tvd)
+            status = "DRIFTED" if tvd > threshold else "NORMAL"
+            print(f"  Client {client_id + 1}: TVD = {tvd:.4f} [{status}]")
+        
+        tvd_scores = np.array(tvd_scores)
+        drifted_clients = np.where(tvd_scores > threshold)[0]
+        normal_clients = np.where(tvd_scores <= threshold)[0]
+        
+        print(f"\nDrifted clients: {list(drifted_clients + 1)}")
+        print(f"Normal clients: {list(normal_clients + 1)}")
+        print(f"Drift rate: {len(drifted_clients) / num_clients * 100:.1f}%\n")
+        
+        # Step 3: Aggregate using only non-drifted clients
+        if len(normal_clients) > 0:
+            print("Step 3: Aggregating from non-drifted clients only...")
+            
+            # Recompute weights using only normal clients
+            normal_sizes = sizes[normal_clients]
+            normal_sizes = normal_sizes / normal_sizes.sum()
+            
+            aggregated = [np.zeros_like(w, dtype=w.dtype) for w in self.model_weights[0]]
+            
+            if use_median:
+                # Use median aggregation for robustness
+                for layer_idx in range(num_layers):
+                    layer_weights = np.array([self.model_weights[cid][layer_idx] for cid in normal_clients])
+                    aggregated[layer_idx] = np.median(layer_weights, axis=0).astype(aggregated[layer_idx].dtype)
+                print("  Aggregation method: Median")
+            else:
+                # Use weighted average
+                for cid, weight_factor in zip(normal_clients, normal_sizes):
+                    for i in range(len(self.model_weights[0])):
+                        aggregated[i] += weight_factor * self.model_weights[cid][i]
+                print("  Aggregation method: Weighted Average")
+            
+            return aggregated
+        
+        else:
+            print("Step 3: All clients drifted! Using all clients with downweighting.")
+            # If all clients drifted, use all but downweight drifted ones
+            adjusted_sizes = np.exp(-tvd_scores)  # Exponential downweighting
+            adjusted_sizes = adjusted_sizes / adjusted_sizes.sum()
+            
+            aggregated = [np.zeros_like(w, dtype=w.dtype) for w in self.model_weights[0]]
+            for w, alpha in zip(self.model_weights, adjusted_sizes):
+                for i in range(len(w)):
+                    aggregated[i] += alpha * w[i]
+            
+            return aggregated
+    
+    def _compute_total_variation_distance(self, weights_a, weights_b):
+        """
+        Compute Total Variation Distance between two sets of weights
+        TVD = 0.5 * sum(|p_i - q_i|) where p and q are distributions
+        """
+        distances = []
+        
+        for w_a, w_b in zip(weights_a, weights_b):
+            # Flatten weights
+            flat_a = w_a.flatten().astype(np.float64)
+            flat_b = w_b.flatten().astype(np.float64)
+            
+            # Normalize to [0, 1] as probability distributions
+            min_val = min(flat_a.min(), flat_b.min())
+            max_val = max(flat_a.max(), flat_b.max())
+            
+            if max_val - min_val > 0:
+                norm_a = (flat_a - min_val) / (max_val - min_val)
+                norm_b = (flat_b - min_val) / (max_val - min_val)
+            else:
+                norm_a = flat_a
+                norm_b = flat_b
+            
+            # Normalize to probability distributions (sum to 1)
+            p = np.abs(norm_a) / (np.abs(norm_a).sum() + 1e-8)
+            q = np.abs(norm_b) / (np.abs(norm_b).sum() + 1e-8)
+            
+            # TVD = 0.5 * L1 distance
+            tvd_layer = 0.5 * np.sum(np.abs(p - q))
+            distances.append(tvd_layer)
+        
+        # Average TVD across all layers, weighted by layer size
+        layer_sizes = np.array([w_a.size for w_a in weights_a])
+        weighted_tvd = np.average(distances, weights=layer_sizes)
+        
+        return float(weighted_tvd)
+    
     def start_server_async(self, session_id: str):
         """Start server in a separate thread"""
         def run():
@@ -464,7 +583,8 @@ class APIDistributedServer(NetworkDistributedServer):
                 srv.close()
                 print("Training server socket closed")
 
-                aggregated = self.federated_averaging()
+                # Use FedTVD aggregation instead of FedAvg
+                aggregated = self.fedtvd_aggregation(threshold=0.5, use_median=False)
                 self.evaluate_and_visualize_to_session(aggregated, session_id)
                 training_state['status'] = 'completed'
             except Exception as e:
@@ -499,8 +619,8 @@ class APIDistributedServer(NetworkDistributedServer):
 
         y_true = np.argmax(self.y_test, axis=1)
         y_pred = np.argmax(model.predict(self.x_test, verbose=0), axis=1)
-        cm = confusion_matrix(y_true, y_pred, labels=list(range(10)))
-        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=list(range(10)))
+        cm = confusion_matrix(y_true, y_pred, labels=list(range(self.num_classes)))
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=list(range(self.num_classes)))
         plt.figure(figsize=(8, 8))
         disp.plot(values_format='d', cmap='Blues', colorbar=True)
         plt.title(f'Confusion Matrix - Accuracy: {acc:.2%}')
@@ -714,7 +834,7 @@ def start_training():
             'session_id': session_id,
         }
         
-        # Create and start server
+        # Create and start server with balancing option
         server = APIDistributedServer(
             dataset_name=dataset_name,
             model_config=model_config,
