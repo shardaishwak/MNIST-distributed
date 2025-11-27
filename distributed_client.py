@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import socket, struct, pickle, time, sys, numpy as np, tensorflow as tf
+import socket, struct, pickle, time, sys, threading, numpy as np, tensorflow as tf, psutil
 from tensorflow.keras.models import model_from_json
 from tensorflow.keras.callbacks import Callback
 
@@ -19,6 +19,48 @@ def recv_bytes(sock: socket.socket) -> bytes:
     (size,) = struct.unpack("!Q", recvn(8))
     return recvn(size)
 
+def get_resource_usage():
+    cpu_percent = psutil.cpu_percent(interval=None)
+    memory = psutil.virtual_memory()
+    process = psutil.Process()
+    process_memory = process.memory_info()
+    return {
+        'cpu_percent': cpu_percent,
+        'memory_percent': memory.percent,
+        'memory_used_gb': memory.used / (1024**3),
+        'memory_total_gb': memory.total / (1024**3),
+        'process_memory_mb': process_memory.rss / (1024**2),
+        'process_cpu_percent': process.cpu_percent(interval=None)
+    }
+
+def print_resource_usage(prefix=""):
+    stats = get_resource_usage()
+    print(f"{prefix}System: CPU {stats['cpu_percent']:5.1f}% | RAM {stats['memory_used_gb']:.1f}/{stats['memory_total_gb']:.1f}GB ({stats['memory_percent']:.1f}%)")
+    print(f"{prefix}Process: CPU {stats['process_cpu_percent']:5.1f}% | RAM {stats['process_memory_mb']:.1f}MB")
+
+class ResourceMonitor:
+    def __init__(self, interval: float = 5.0, client_id: int = None):
+        self.interval = interval
+        self.client_id = client_id
+        self._running = False
+        self._thread = None
+    
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._thread.start()
+    
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
+    
+    def _monitor_loop(self):
+        while self._running:
+            prefix = f"[Client {self.client_id}] " if self.client_id else ""
+            print_resource_usage(prefix)
+            time.sleep(self.interval)
+
 class EpochProgressCallback(Callback):
     """Callback to send epoch progress updates to server"""
     def __init__(self, sock: socket.socket, client_id: int):
@@ -26,8 +68,13 @@ class EpochProgressCallback(Callback):
         self.sock = sock
         self.client_id = client_id
     
+    def on_epoch_begin(self, epoch, logs=None):
+        print(f"\n--- Epoch {epoch + 1} Starting ---")
+        print_resource_usage(f"[Client {self.client_id}] ")
+    
     def on_epoch_end(self, epoch, logs=None):
-        """Send progress update after each epoch"""
+        print(f"\n--- Epoch {epoch + 1} Complete ---")
+        print_resource_usage(f"[Client {self.client_id}] ")
         try:
             progress_msg = {
                 'type': 'progress',
@@ -63,12 +110,14 @@ class NetworkDistributedClient:
         while True:
             try:
                 print(f"[Attempt {attempt}] Trying to connect to {self.server_host}:{self.server_port}...")
+                print_resource_usage("  ")
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(self.connection_timeout)
                 s.connect((self.server_host, self.server_port))
                 s.settimeout(None)
                 self.sock = s
                 print(f"Successfully connected to {self.server_host}:{self.server_port}")
+                print_resource_usage("  ")
                 break
             except (ConnectionRefusedError, socket.timeout, OSError) as e:
                 print(f"Connection failed: {type(e).__name__}. Retrying in {self.retry_interval} seconds...")
@@ -120,6 +169,11 @@ class NetworkDistributedClient:
         self.model.compile(optimizer=opt, loss='categorical_crossentropy', metrics=['accuracy'])
 
     def train(self, epochs=5, batch_size=64, validation_split=0.1):
+        print(f"\n{'='*60}")
+        print(f"Client {self.client_id} STARTING TRAINING")
+        print(f"{'='*60}")
+        print_resource_usage(f"[Client {self.client_id}] ")
+        
         progress_callback = EpochProgressCallback(self.sock, self.client_id)
         callbacks = [
             progress_callback,
@@ -140,7 +194,12 @@ class NetworkDistributedClient:
             verbose=1, callbacks=callbacks
         )
         dt = time.time() - t0
-        print(f"Client {self.client_id} finished training in {dt:.1f}s")
+        
+        print(f"\n{'='*60}")
+        print(f"Client {self.client_id} FINISHED TRAINING in {dt:.1f}s")
+        print(f"{'='*60}")
+        print_resource_usage(f"[Client {self.client_id}] ")
+        
         return {
             'accuracy': list(hist.history.get('accuracy', [])),
             'val_accuracy': list(hist.history.get('val_accuracy', [])),
@@ -222,6 +281,10 @@ class NetworkDistributedClient:
                 time.sleep(self.retry_interval)
 
 def main():
+    # Initialize CPU measurement (first call always returns 0)
+    psutil.cpu_percent(interval=None)
+    psutil.Process().cpu_percent(interval=None)
+    
     if len(sys.argv) < 2:
         print("Usage: client.py <server_host> [server_port] [retry_interval]")
         print("  server_host: IP address or hostname of the server")
@@ -231,11 +294,19 @@ def main():
     host = sys.argv[1]
     port = int(sys.argv[2]) if len(sys.argv) >= 3 else 8888
     retry_interval = int(sys.argv[3]) if len(sys.argv) >= 4 else 5
+    
+    print(f"\n{'='*60}")
     print(f"  Federated Learning Client")
+    print(f"{'='*60}")
     print(f"  Server: {host}:{port}")
     print(f"  Retry interval: {retry_interval}s")
     print(f"  Mode: Continuous (will reconnect after each session)")
-    print(f"  Press Ctrl+C to stop\n")
+    print(f"  Press Ctrl+C to stop")
+    print(f"{'='*60}")
+    print(f"\nInitial Resource Status:")
+    print_resource_usage("  ")
+    print()
+    
     NetworkDistributedClient(host, port, retry_interval=retry_interval).run_continuous(epochs=None, batch_size=64)
 
 if __name__ == "__main__":
